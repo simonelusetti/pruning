@@ -1,0 +1,59 @@
+stop point, % of parameters removed (Stage 1 included), by margin rho:
+rho                                   0.000  0.005  0.010  0.020  0.050
+L method                        seed                                   
+2 S | valA                      0      10.4   12.5   14.2   15.8   19.1
+                                1       8.7   11.4   12.6   14.5   18.0
+                                2       8.6   11.4   13.0   14.6   18.2
+  S+stream | valA               0      10.4   12.5   14.2   15.8   19.1
+                                1       8.7   11.4   12.6   14.5   18.0
+                                2       8.6   11.4   13.0   14.6   18.2
+  W+S | valA | magnitude        0       9.7   13.4   15.4   23.5   30.4
+                                1       8.7   11.4   20.4   24.7   30.7
+                                2       8.6   11.7   18.0   23.6   29.2
+  W+S+stream | valA | magnitude 0       9.7   13.4   15.4   23.5   30.4
+                                1       8.7   11.4   20.4   24.7   30.7
+                                2       8.6   11.7   18.0   23.6   29.2
+  stream only | valA            0       2.4    3.0    3.0    4.6    9.2
+                                1       2.4    2.4    3.0    4.6    7.6
+                                2       2.4    2.4    3.0    6.1    9.2
+
+mean over seeds [min, max]:
+rho                                        0.000              0.005              0.010              0.020              0.050
+L method                                                                                                                    
+2 S | valA                       9.2 [8.6, 10.4]  11.8 [11.4, 12.5]  13.3 [12.6, 14.2]  15.0 [14.5, 15.8]  18.4 [18.0, 19.1]
+  S+stream | valA                9.2 [8.6, 10.4]  11.8 [11.4, 12.5]  13.3 [12.6, 14.2]  15.0 [14.5, 15.8]  18.4 [18.0, 19.1]
+  W+S | valA | magnitude          9.0 [8.6, 9.7]  12.2 [11.4, 13.4]  17.9 [15.4, 20.4]  23.9 [23.5, 24.7]  30.1 [29.2, 30.7]
+  W+S+stream | valA | magnitude   9.0 [8.6, 9.7]  12.2 [11.4, 13.4]  17.9 [15.4, 20.4]  23.9 [23.5, 24.7]  30.1 [29.2, 30.7]
+  stream only | valA              2.4 [2.4, 2.4]     2.6 [2.4, 3.0]     3.0 [3.0, 3.0]     5.1 [4.6, 6.1]     8.7 [7.6, 9.2]
+
+stream moves chosen (whole path / before the rho = 5% stop):
+  S+stream | valA                  seed 0:   0 /   0
+  S+stream | valA                  seed 1:   0 /   0
+  S+stream | valA                  seed 2:   0 /   0
+  W+S+stream | valA | magnitude    seed 0:   0 /   0
+  W+S+stream | valA | magnitude    seed 1:   0 /   0
+  W+S+stream | valA | magnitude    seed 2:   0 /   0
+  stream only | valA               seed 0:  56 /   5
+  stream only | valA               seed 1:  55 /   4
+  stream only | valA               seed 2:  56 /   5
+
+parameters removed by move kind up to the rho = 5% stop (% of p, mean over seeds; Stage 1 = 2.4):
+                 pct                                                                                                n                                                                                        
+method      S | valA S+stream | valA W+S | valA | magnitude W+S+stream | valA | magnitude stream only | valA S | valA S+stream | valA W+S | valA | magnitude W+S+stream | valA | magnitude stream only | valA
+kind                                                                                                                                                                                                         
+ov_rank          1.6             1.6                    0.6                           0.6                        13.7            13.7                    6.0                           6.0                   
+qk_rank          7.7             7.7                    6.1                           6.1                        67.3            67.3                   53.7                          53.7                   
+stream_mean                                                                                              6.3                                                                                              4.7
+unit_mean        4.7             4.7                    4.0                           4.0                        40.7            40.7                   37.3                          37.3                   
+unit_merge       0.2             0.2                    0.1                           0.1                         2.0             2.0                    1.0                           1.0                   
+unit_sat         1.9             1.9                    1.6                           1.6                        16.3            16.3                   14.3                          14.3                   
+zero                                                   15.3                          15.3                                                              264.7                         264.7                   
+
+test loss / unpruned test loss at matched sparsity (linear interpolation, mean over seeds):
+at                               0.1    0.2    0.3    0.4
+method                                                   
+S | valA                       0.999  1.040    NaN    NaN
+S+stream | valA                0.999  1.040    NaN    NaN
+W+S | valA | magnitude         0.999  1.004  1.030    NaN
+W+S+stream | valA | magnitude  0.999  1.004  1.030    NaN
+stream only | valA             1.039  1.122  1.268  1.463

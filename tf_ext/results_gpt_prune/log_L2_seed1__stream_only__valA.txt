@@ -1,0 +1,8 @@
+L=2 seed 1: p = 110529, after Stage 1 k = 107931 (2598 removed exactly, max |logit change| 6.0e-05); val loss 1.5836
+[L2 s1 stream only | valA] step    10  k_eff  91877 ( 14.9% removed)  val 1.8323  test 2.0596  last=stream_mean[stream] {'slot': 2}  ties 3/11  387s
+[L2 s1 stream only | valA] step    20  k_eff  74857 ( 30.6% removed)  val 2.3167  test 2.4593  last=stream_mean[stream] {'slot': 2}  ties 1/11  772s
+[L2 s1 stream only | valA] step    30  k_eff  57837 ( 46.4% removed)  val 2.9964  test 3.0531  last=stream_mean[stream] {'slot': 5}  ties 1/11  1164s
+[L2 s1 stream only | valA] step    40  k_eff  40817 ( 62.2% removed)  val 3.6133  test 3.6522  last=stream_mean[stream] {'slot': 1}  ties 2/11  1533s
+[L2 s1 stream only | valA] step    50  k_eff  23797 ( 78.0% removed)  val 3.9995  test 4.0795  last=stream_mean[stream] {'slot': 3}  ties 1/11  1907s
+DONE L=2 seed 1 stream only | valA: 55 steps, 86.2% removed, 2117s
+ALL DONE L=2 seed 1
