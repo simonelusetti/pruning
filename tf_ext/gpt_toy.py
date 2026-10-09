@@ -8,11 +8,14 @@ context T = 32):
         x = x + Attn_l(LN1_l(x))     q, k, v = h W_Q + b_Q, h W_K + b_K, h W_V + b_V   (causal)
                                      out = sum_heads A v W_O + b_O
         x = x + MLP_l(LN2_l(x))      W_2 GELU(W_1 h + b_1) + b_2      (exact, erf GELU)
-    logits = LN_f(x) W_E^T + b_U     (tied embedding: W_U = W_E^T)
+    logits = LN_f(x) W_U + b_U       (untied: W_U is its own d x V matrix)
     LN(x) = gamma * (x - mean x) / sqrt(var x + 1e-5) + beta
 
-Nothing is removed or folded here: gamma, beta, every bias and the tie are trained as in
-GPT.  Folds and moves happen only inside the pruning runs, on a copy.
+Nothing is removed or folded here: gamma, beta and every bias are trained as in GPT.
+The embedding is untied (as in LLaMA-style models; GPT-2 ties W_U = W_E^T): with a tie
+the exact LayerNorm folds and the stream move would change the two uses of W_E
+differently.  The tied models are kept in results_gpt_tied/.
+Folds and moves happen only inside the pruning runs, on a copy.
 
 Data: Karpathy's tinyshakespeare (data/shakespeare/input.txt, 1 115 394 characters,
 vocabulary 65), split 80 / 10 / 10 into train / val / test text, so that the pruning
@@ -21,7 +24,7 @@ Loss: next-character cross-entropy at every position.
 
 Training: nanoGPT's shakespeare_char recipe, scaled to the toy: AdamW, lr 1e-3 with
 100 warm-up steps and cosine decay to 1e-4, betas (0.9, 0.99), weight decay 0.1 on
-tensors with >= 2 dimensions (matrices, W_E, W_pos) and none on biases, gamma, beta,
+tensors with >= 2 dimensions (matrices, W_E, W_pos, W_U) and none on biases, gamma, beta,
 gradient clipping at 1.0, batch 64 random windows, dropout 0.  Init as nanoGPT:
 N(0, 0.02), W_O and W_2 at 0.02 / sqrt(2 L), biases 0, gamma 1, beta 0.
 
@@ -99,7 +102,7 @@ def init_params(cfg: GPTConfig, seed=0) -> dict:
         "W_1": n(L, dm, d), "b_1": torch.zeros(L, dm),
         "W_2": n(L, d, dm, std=res), "b_2": torch.zeros(L, d),
         "lnf_g": torch.ones(d), "lnf_b": torch.zeros(d),
-        "b_U": torch.zeros(cfg.V),
+        "W_U": n(d, cfg.V), "b_U": torch.zeros(cfg.V),
     }
 
 
@@ -133,7 +136,7 @@ def forward(P: dict, cfg: GPTConfig, X: torch.Tensor, cache: bool = False):
         x = x + a @ P["W_2"][l].T + P["b_2"][l]
     if cache:
         c["x_in"].append(x)
-    z = layer_norm(x, P["lnf_g"], P["lnf_b"]) @ P["W_E"].T + P["b_U"]
+    z = layer_norm(x, P["lnf_g"], P["lnf_b"]) @ P["W_U"] + P["b_U"]
     return (z, c) if cache else z
 
 

@@ -7,4 +7,4 @@ _to_delete/
 *.ckpt
 *.ckpt.finished
 .DS_Store
-tf_ext/results_gpt/*/step*.pt
+tf_ext/results_gpt*/*/step*.pt

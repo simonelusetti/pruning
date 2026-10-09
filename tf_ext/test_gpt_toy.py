@@ -18,8 +18,8 @@ X = torch.randint(0, 65, (16, 32))
 
 
 def test_parameter_count():
-    # per block 49 984, W_E 65 x 64 = 4 160 (tied), W_pos 32 x 64 = 2 048, LN_f 128, b_U 65
-    assert G.n_params(P) == 2 * 49984 + 4160 + 2048 + 128 + 65 == 106369
+    # per block 49 984, W_E 65 x 64 = 4 160, W_U 64 x 65 = 4 160, W_pos 32 x 64 = 2 048, LN_f 128, b_U 65
+    assert G.n_params(P) == 2 * 49984 + 2 * 4160 + 2048 + 128 + 65 == 110529
 
 
 def test_layer_norm_matches_torch():
@@ -46,11 +46,12 @@ def test_causal():
     assert torch.allclose(z1[:, :20], z2[:, :20], atol=1e-6) and not torch.allclose(z1[:, 20:], z2[:, 20:])
 
 
-def test_tied_unembedding():
+def test_untied_unembedding():
     _, c = G.forward(P, CFG, X, cache=True)
     z = G.forward(P, CFG, X)
-    ref = G.layer_norm(c["x_in"][-1], P["lnf_g"], P["lnf_b"]) @ P["W_E"].T + P["b_U"]
+    ref = G.layer_norm(c["x_in"][-1], P["lnf_g"], P["lnf_b"]) @ P["W_U"] + P["b_U"]
     assert torch.allclose(z, ref)
+    assert P["W_U"].data_ptr() != P["W_E"].data_ptr() and not torch.allclose(P["W_U"], P["W_E"].T)
 
 
 def test_data_split_and_windows():
