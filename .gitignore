@@ -1,0 +1,9 @@
+# local package install (reinstall on each machine)
+.pylibs/
+.venv/
+__pycache__/
+.pytest_cache/
+_to_delete/
+*.ckpt
+*.ckpt.finished
+.DS_Store

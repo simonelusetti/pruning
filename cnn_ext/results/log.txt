@@ -1,0 +1,24 @@
+[seed 0] base: train loss 0.0015 acc 1.000  valA loss 0.0283 acc 0.989  valB loss 0.0221 acc 0.989  test loss 0.0394 acc 0.983
+[seed 0] W | valA | obd: 349 steps to 6.8%, 47s
+[seed 0] W | valA | magnitude: 1179 steps to 23.0%, 151s
+[seed 0] S-naive | valA: 42 steps to 97.2%, 8s
+[seed 0] S-cnn | valA: 42 steps to 97.2%, 28s
+[seed 0] W+S-naive | valA | obd: 176 steps to 97.5%, 51s
+[seed 0] W+S-cnn | valA | obd: 135 steps to 97.0%, 71s
+[seed 0] W+S-cnn | train | obd: 273 steps to 97.0%, 239s
+[seed 1] base: train loss 0.0017 acc 1.000  valA loss 0.0313 acc 0.989  valB loss 0.0528 acc 0.983  test loss 0.0394 acc 0.986
+[seed 1] W | valA | obd: 326 steps to 17.6%, 42s
+[seed 1] W | valA | magnitude: 1222 steps to 23.8%, 149s
+[seed 1] S-naive | valA: 42 steps to 97.2%, 9s
+[seed 1] S-cnn | valA: 43 steps to 97.7%, 23s
+[seed 1] W+S-naive | valA | obd: 136 steps to 97.3%, 41s
+[seed 1] W+S-cnn | valA | obd: 137 steps to 97.2%, 57s
+[seed 1] W+S-cnn | train | obd: 283 steps to 97.3%, 209s
+[seed 2] base: train loss 0.0022 acc 1.000  valA loss 0.0244 acc 0.994  valB loss 0.0269 acc 0.994  test loss 0.0674 acc 0.981
+[seed 2] W | valA | obd: 312 steps to 6.1%, 42s
+[seed 2] W | valA | magnitude: 1199 steps to 23.4%, 142s
+[seed 2] S-naive | valA: 42 steps to 97.7%, 8s
+[seed 2] S-cnn | valA: 42 steps to 97.2%, 25s
+[seed 2] W+S-naive | valA | obd: 145 steps to 97.5%, 41s
+[seed 2] W+S-cnn | valA | obd: 128 steps to 97.0%, 61s
+[seed 2] W+S-cnn | train | obd: 238 steps to 97.0%, 201s

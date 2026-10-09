@@ -1,0 +1,3 @@
+base_valB_loss 0.196702
+test_acc 0.924500
+params 42698

@@ -1,0 +1,46 @@
+method,rho,kind,pct,n
+S | valA,0.01,ov_rank,8.036415005493643,36
+S | valA,0.01,qk_rank,13.394025009156072,60
+S | valA,0.01,unit_mean,2.699733165908021,12
+S | valA,0.01,unit_merge,20.247998744310156,90
+S | valA,1.0,ov_rank,8.482882505798845,38
+S | valA,1.0,qk_rank,13.394025009156072,60
+S | valA,1.0,unit_mean,4.724533040339036,21
+S | valA,1.0,unit_merge,25.19750954847486,112
+S | valA,1.0,unit_sat,0.8999110553026736,4
+S+stream | valA,0.01,ov_rank,7.806205200648773,36
+S+stream | valA,0.01,qk_rank,13.184743368388007,60
+S+stream | valA,0.01,stream_mean,8.366033589703344,7
+S+stream | valA,0.01,unit_merge,3.2229372678281796,16
+S+stream | valA,1.0,ov_rank,8.36777760337641,40
+S+stream | valA,1.0,qk_rank,13.184743368388007,60
+S+stream | valA,1.0,stream_mean,32.121243830551634,32
+S+stream | valA,1.0,unit_mean,3.1845689670207014,24
+S+stream | valA,1.0,unit_merge,19.841643558485497,121
+S+stream | valA,1.0,unit_sat,1.2992901864350617,11
+W+S | valA | fdist,0.01,ov_rank,8.036415005493643,36
+W+S | valA | fdist,0.01,qk_rank,13.17079125900347,59
+W+S | valA | fdist,0.01,unit_mean,1.1214007917822075,5
+W+S | valA | fdist,0.01,unit_merge,20.22009452554108,90
+W+S | valA | fdist,0.01,zero,1.7858700012208095,15
+W+S | valA | fdist,1.0,ov_rank,8.055599155897383,37
+W+S | valA | fdist,1.0,qk_rank,13.17079125900347,59
+W+S | valA | fdist,1.0,unit_mean,4.333873977571984,27
+W+S | valA | fdist,1.0,unit_merge,29.449414883412686,137
+W+S | valA | fdist,1.0,unit_sat,1.2748739950121208,9
+W+S | valA | fdist,1.0,zero,10.045518756867054,89
+W+S+stream | valA | fdist,0.01,ov_rank,7.806205200648773,36
+W+S+stream | valA | fdist,0.01,qk_rank,13.184743368388007,60
+W+S+stream | valA | fdist,0.01,stream_mean,16.460001046408205,16
+W+S+stream | valA | fdist,0.01,unit_mean,0.17265735363365248,1
+W+S+stream | valA | fdist,0.01,unit_merge,10.460594011057047,54
+W+S+stream | valA | fdist,0.01,zero,1.5626362510682084,14
+W+S+stream | valA | fdist,1.0,ov_rank,7.811437241667974,37
+W+S+stream | valA | fdist,1.0,qk_rank,13.184743368388007,60
+W+S+stream | valA | fdist,1.0,stream_mean,17.487225099844782,17
+W+S+stream | valA | fdist,1.0,unit_mean,2.003871710354209,22
+W+S+stream | valA | fdist,1.0,unit_merge,19.649802054448106,119
+W+S+stream | valA | fdist,1.0,unit_sat,0.5563403617084358,8
+W+S+stream | valA | fdist,1.0,zero,12.862100838870576,115
+stream only | valA,0.01,stream_mean,6.988262787980258,5
+stream only | valA,1.0,stream_mean,8.54217897068313,6

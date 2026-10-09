@@ -1,0 +1,60 @@
+seeds [np.int64(0), np.int64(1), np.int64(2)]
+base networks: seed 0: val loss 0.0262, test acc 0.986; seed 1: val loss 0.0416, test acc 0.989; seed 2: val loss 0.0261, test acc 0.983
+
+1. STOP POINT: % of parameters removed (mean over seeds, [min, max]); test acc at the stop (mean)
+method                                     rho=0              rho=0.01               rho=0.1                 rho=1
+W+S-cnn | valA | obd         19.7 [11.6,30.3] 0.982    20.6 [14.3,30.3] 0.981    34.1 [25.7,46.2] 0.974    48.8 [41.0,61.2] 0.965 
+W+S-cnn | train | obd        20.0 [12.3,32.5] 0.986    25.5 [15.4,32.5] 0.984    36.0 [28.8,41.7] 0.975    56.8 [44.4,76.1] 0.965 
+S-cnn | valA                 19.7 [11.6,30.3] 0.982    22.5 [17.2,30.3] 0.983    26.2 [22.4,30.3] 0.977    52.5 [41.0,72.4] 0.950 
+W+S-naive | valA | obd       16.5 [14.3,18.1] 0.981    16.5 [14.3,18.1] 0.981    27.1 [18.1,37.4] 0.974    48.1 [35.7,65.0] 0.953 
+S-naive | valA               16.5 [14.3,18.1] 0.981    16.5 [14.3,18.1] 0.981    34.3 [18.1,59.1] 0.966    47.9 [35.7,64.4] 0.959 
+W | valA | obd                2.7 [ 0.4, 6.5] 0.970     2.7 [ 0.4, 6.5] 0.970     2.8 [ 0.4, 6.5] 0.969     3.5 [ 0.5, 7.3] 0.965 
+W | valA | magnitude         18.2 [ 9.7,22.7] 0.979    20.5 [12.9,26.6] 0.974    20.8 [12.9,26.6] 0.974    24.0 [15.6,28.6] 0.975*
+magnitude                    13.8 [ 5.9,27.7] 0.969    14.5 [ 5.9,27.7] 0.969    15.2 [ 7.9,27.7] 0.968    21.8 [17.8,29.7] 0.962 
+obd                          11.9 [ 2.0,21.8] 0.974    13.2 [ 6.0,21.8] 0.975    13.9 [ 6.0,21.8] 0.971    17.8 [13.9,23.7] 0.949 
+random                        0.0 [ 0.0, 0.0] 0.986     0.0 [ 0.0, 0.0] 0.986     0.0 [ 0.0, 0.0] 0.986     0.0 [ 0.0, 0.0] 0.986 
+mean_ablation                21.2 [ 6.0,48.5] 0.966    21.2 [ 6.0,48.5] 0.966    22.2 [ 9.1,48.5] 0.965    35.2 [24.2,51.3] 0.949 
+(* = for at least one seed the path never failed the test before its end: the stop is censored)
+
+2. MATCHED SPARSITY: test accuracy (mean over seeds) and test loss / base, at % removed
+method                               10%           30%           50%           70%           90%
+W+S-cnn | valA | obd        0.985/  1.0x  0.977/  1.6x  0.958/  2.6x  0.934/  4.6x  0.792/ 13.6x
+W+S-cnn | train | obd       0.983/  1.1x  0.978/  1.4x  0.970/  2.0x  0.963/  3.0x  0.835/ 11.5x
+S-cnn | valA                0.985/  1.0x  0.976/  1.5x  0.963/  2.4x  0.904/  6.3x  0.666/ 22.8x
+W+S-naive | valA | obd      0.981/  1.2x  0.974/  1.7x  0.961/  2.5x  0.933/  5.4x  0.753/ 16.9x
+S-naive | valA              0.981/  1.2x  0.974/  1.7x  0.962/  2.5x  0.894/  6.6x  0.584/ 27.8x
+W | valA | obd              0.969/  2.4x             -             -             -             -
+W | valA | magnitude        0.983/  1.0x             -             -             -             -
+magnitude                   0.980/  1.4x  0.820/ 18.7x  0.442/147.9x  0.285/196.1x  0.130/170.9x
+obd                         0.981/  1.2x  0.644/ 56.0x  0.329/303.4x  0.196/337.1x  0.099/510.3x
+random                      0.363/222.9x  0.171/367.4x  0.133/345.8x  0.121/254.5x  0.101/ 75.6x
+mean_ablation               0.981/  1.3x  0.947/  3.3x  0.885/  7.7x  0.618/ 27.8x  0.242/ 64.6x
+
+3. MOVE KINDS up to the stop point (rho = 10%): % of the original parameters removed by each kind (sum of dk), mean over seeds
+  W+S-cnn | valA | obd       gap_merge 17.1, chan_merge_sp 8.5, chan_merge_pw 3.9, gap_mean 2.7, chan_mean_in 1.9
+  W+S-cnn | train | obd      gap_merge 22.9, chan_merge_sp 7.8, gap_mean 3.0, chan_mean_in 1.9, zero 0.4
+  S-cnn | valA               gap_merge 11.9, chan_merge_sp 5.8, chan_merge_pw 3.9, gap_mean 2.7, chan_mean_in 1.9
+  W+S-naive | valA | obd     gap_merge 17.1, chan_merge_pw 5.3, gap_mean 2.7, chan_mean_in 1.9
+  S-naive | valA             gap_merge 19.9, chan_merge_pw 8.2, gap_mean 4.2, chan_mean_in 1.9
+  W | valA | obd             zero 2.8
+  W | valA | magnitude       zero 20.8
+
+4. PER SEED: % removed at the stop, CNN-aware vs naive moves
+  rho=0.01  S-cnn | valA           vs S-naive | valA           seed 0:  30.3 vs  18.1  seed 1:  19.9 vs  14.3  seed 2:  17.2 vs  17.2
+  rho=0.01  W+S-cnn | valA | obd   vs W+S-naive | valA | obd   seed 0:  30.3 vs  18.1  seed 1:  14.3 vs  14.3  seed 2:  17.2 vs  17.2
+  rho=0.1   S-cnn | valA           vs S-naive | valA           seed 0:  30.3 vs  18.1  seed 1:  22.4 vs  59.1  seed 2:  25.7 vs  25.7
+  rho=0.1   W+S-cnn | valA | obd   vs W+S-naive | valA | obd   seed 0:  30.3 vs  18.1  seed 1:  46.2 vs  37.4  seed 2:  25.7 vs  25.7
+  rho=1     S-cnn | valA           vs S-naive | valA           seed 0:  41.0 vs  43.7  seed 1:  72.4 vs  64.4  seed 2:  44.1 vs  35.7
+  rho=1     W+S-cnn | valA | obd   vs W+S-naive | valA | obd   seed 0:  41.0 vs  43.7  seed 1:  61.2 vs  65.0  seed 2:  44.1 vs  35.7
+
+5. REPLAY: seed 0, W+S-cnn | valA | obd, stop at rho=0.1: step 9, k_eff 3575 (csv 3575) of 5130
+  conv1 channels alive 14/16, conv2 channels alive 25/32, region bias B2 live: False
+  W1: 126 live of 144
+  b1: 14 live of 16
+  W2: 3150 live of 4608
+  b2: 25 live of 32
+  B2: 0 live of 288
+  Wf: 250 live of 320
+  bf: 10 live of 10
+  valB: loss 0.0218 -> 0.0523, acc 0.994 -> 0.983
+  test: loss 0.0390 -> 0.0759, acc 0.986 -> 0.975

@@ -1,0 +1,37 @@
+seeds [np.int64(0), np.int64(1)]
+base networks: seed 0: val loss 0.5843, test acc 0.793; seed 1: val loss 0.5224, test acc 0.810
+
+1. STOP POINT: % of parameters removed (mean over seeds, [min, max]); test acc at the stop (mean)
+method                                     rho=0              rho=0.01               rho=0.1                 rho=1
+W+S-cnn | valA | obd         23.3 [ 0.0,46.7] 0.801    45.9 [34.9,56.8] 0.799    63.2 [60.5,65.9] 0.784    93.5 [91.9,95.2] 0.588 
+S-cnn | valA                 33.3 [19.9,46.7] 0.801    43.5 [30.2,56.8] 0.798    64.0 [62.2,65.9] 0.783    91.9 [91.2,92.6] 0.571 
+S-naive | valA               28.7 [22.4,34.9] 0.802    38.1 [29.9,46.2] 0.798    62.3 [62.2,62.4] 0.780    90.3 [88.3,92.3] 0.558 
+W | valA | magnitude         13.9 [10.0,17.8] 0.800    16.1 [11.5,20.6] 0.800    26.7 [25.9,27.4] 0.788*   29.8 [25.9,33.7] 0.784*
+magnitude                     4.0 [ 4.0, 4.0] 0.801     5.9 [ 4.0, 7.9] 0.801    17.8 [11.9,23.7] 0.787    37.6 [35.6,39.6] 0.637 
+obd                           0.0 [ 0.0, 0.0] 0.801     0.0 [ 0.0, 0.0] 0.801     0.0 [ 0.0, 0.0] 0.801     0.0 [ 0.0, 0.0] 0.801 
+random                        0.0 [ 0.0, 0.0] 0.801     0.0 [ 0.0, 0.0] 0.801     0.0 [ 0.0, 0.0] 0.801     2.0 [ 0.0, 4.0] 0.730 
+mean_ablation                 5.9 [ 5.8, 6.0] 0.801    11.7 [ 9.1,14.3] 0.800    23.4 [21.2,25.7] 0.781    51.3 [48.3,54.3] 0.602 
+(* = for at least one seed the path never failed the test before its end: the stop is censored)
+
+2. MATCHED SPARSITY: test accuracy (mean over seeds) and test loss / base, at % removed
+method                               10%           30%           50%           70%           90%
+W+S-cnn | valA | obd        0.802/  1.0x  0.801/  1.0x  0.794/  1.0x  0.776/  1.1x  0.637/  1.7x
+S-cnn | valA                0.802/  1.0x  0.801/  1.0x  0.795/  1.0x  0.776/  1.1x  0.631/  1.7x
+S-naive | valA              0.802/  1.0x  0.801/  1.0x  0.795/  1.0x  0.768/  1.2x  0.617/  1.8x
+W | valA | magnitude        0.801/  1.0x  0.776/  1.1x             -             -             -
+magnitude                   0.798/  1.0x  0.753/  1.2x  0.470/  3.2x  0.322/  4.5x  0.114/  7.3x
+obd                         0.117/ 71.1x  0.100/124.1x  0.100/127.5x  0.100/134.0x  0.100/101.1x
+random                      0.459/  4.1x  0.213/  9.5x  0.121/ 10.2x  0.100/  6.8x  0.114/  4.3x
+mean_ablation               0.799/  1.0x  0.760/  1.2x  0.601/  1.9x  0.351/  3.3x  0.139/  6.3x
+
+3. MOVE KINDS up to the stop point (rho = 10%): % of the original parameters removed by each kind (sum of dk), mean over seeds
+  W+S-cnn | valA | obd       chan_merge_sp 24.9, gap_merge 16.9, chan_merge_pw 11.1, gap_mean 7.3, zero 3.0
+  S-cnn | valA               chan_merge_sp 22.9, gap_merge 17.7, chan_merge_pw 13.3, gap_mean 7.2, chan_mean_in 2.9
+  S-naive | valA             chan_merge_pw 30.2, gap_merge 21.4, gap_mean 7.8, chan_mean_in 2.9
+  W | valA | magnitude       zero 26.7
+
+4. PER SEED: % removed at the stop
+  rho=0     seed 0: W+S-cnn 46.7, S-cnn 46.7, S-naive 34.9, W 10.0  |  seed 1: W+S-cnn 0.0, S-cnn 19.9, S-naive 22.4, W 17.8
+  rho=0.01  seed 0: W+S-cnn 56.8, S-cnn 56.8, S-naive 46.2, W 11.5  |  seed 1: W+S-cnn 34.9, S-cnn 30.2, S-naive 29.9, W 20.6
+  rho=0.1   seed 0: W+S-cnn 65.9, S-cnn 65.9, S-naive 62.4, W 25.9  |  seed 1: W+S-cnn 60.5, S-cnn 62.2, S-naive 62.2, W 27.4
+  one-shot OBD baseline, test acc by weight fraction: 0.00:0.79, 0.04:0.19, 0.08:0.10, 0.12:0.10, 0.16:0.10
