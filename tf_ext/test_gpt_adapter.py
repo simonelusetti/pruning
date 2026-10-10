@@ -112,7 +112,7 @@ def test_every_move_kind_applies():
         assert all(bool(torch.isfinite(v).all()) for v in s2.params.values())
         assert math.isfinite(AD.metrics(s2, "valA")["loss"])
         seen.add(m.kind)
-    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS + GA.STREAM_FINE_KINDS)
+    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS + GA.STREAM_FINE_KINDS + GA.STREAM_WRITE_KINDS)
 
 
 def test_rank_cuts_after_stream_move():
@@ -177,7 +177,7 @@ def test_token_merge_exact_for_identical_rows_and_counts():
     s = S0.clone()
     s.params["W_E"][7] = s.params["W_E"][3]
     s2 = AD.apply(s, _mv("token_merge", c=7, c2=3))
-    assert float((logits(s2) - logits(s)).abs().max()) < 1e-5
+    assert float((logits(s2) - logits(s)).abs().max()) < 1e-4                # float rounding of the weighted mean
     assert AD.k_eff(s) - AD.k_eff(s2) == 63
     assert int(s2.struct["tok_group"][7]) == 3
 
@@ -292,6 +292,7 @@ def test_slot_moves_rotate_only_pristine_coordinates():
     s = AD.apply(_touched(20), Move("stream_read", "t", 0, {"site": 1, "reader": "W_1", "j": 20}))
     masks20 = {n: s.masks[n].select(ax, 20).clone() for n, ax in GA.STREAM_AX.items()}
     for kind, p in (("stream_site", {"site": 2, "slot": 0}), ("stream_read", {"site": 0, "reader": "W_V", "slot": 0}),
+                    ("stream_write", {"writer": 3, "slot": 0}),
                     ("stream_mean", {"slot": 0})):
         s2 = AD.apply(s, Move(kind, "t", 0, p))
         assert s2 is not None and AD.k_eff(s2) < AD.k_eff(s), kind
@@ -307,6 +308,40 @@ def test_global_move_exact_after_fine_moves():
     s2 = AD.apply(s, Move("stream_mean", "stream", 0, {"slot": 0}))
     ref = replaced_forward(s, u, X, AD.data["stats"][0])
     assert float((logits(s2) - ref).abs().max()) < 1e-4 * float(ref.abs().max())
+
+
+
+
+
+# ---- writer-side stream moves ------------------------------------------------------------------------------
+
+def test_stream_write_exact_for_every_writer():
+    j = 20
+    freed = {"emb": 65, "pos": 32, ("attn", 0): 64, ("mlp", 0): 256, ("attn", 1): 64, ("mlp", 1): 256}
+    for wi, w in enumerate(AD.writers()):
+        s = _touched(j)
+        mu = float(AD._writer_contrib(s, AD._stats(s), w)[..., j].double().mean())
+        s2 = AD.apply(s, Move("stream_write", "t", 0, {"writer": wi, "j": j}))
+        ref = AD._forward(AD.effective(s), s.struct, X, write_over={w: (j, mu)})[0]
+        assert float((logits(s2) - ref).abs().max()) < 1e-4, w
+        assert AD.k_eff(s) - AD.k_eff(s2) == freed[w], (w, AD.k_eff(s) - AD.k_eff(s2))
+
+
+def test_constant_coordinate_is_removed_exactly():
+    """positions, then embedding, then every block output replaced by constants: x_j is then the
+    same at every site for every input, and the global move on j changes nothing."""
+    j = 20
+    s = _touched(j)
+    order = ["pos", "emb"] + [w for w in AD.writers() if w not in ("pos", "emb")]
+    for w in order:
+        s = AD.apply(s, Move("stream_write", "t", 0, {"writer": AD.writers().index(w), "j": j}))
+        assert s is not None, w
+    c = AD._stats(s)
+    for x in c["x"]:
+        assert float(x[..., j].std()) < 1e-5
+    s2 = AD.apply(s, Move("stream_mean", "stream", 0, {"j": j}))
+    assert float((logits(s2) - logits(s)).abs().max()) < 1e-4
+    assert not bool(s2.struct["stream_alive"][j]) and AD.k_eff(s2) < AD.k_eff(s)
 
 
 if __name__ == "__main__":

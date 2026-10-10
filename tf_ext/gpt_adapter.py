@@ -62,6 +62,13 @@ Stream moves at finer granularity (STREAM_FINE_KINDS).  A reader sees n = x / s;
   n at site k (n_site per site); per reader, the one among the 6 smallest minimising
   Var(u.n) |W^T u|^2; and every live (site, coordinate) / (reader, coordinate) pair of
   touched coordinates.
+  stream_write (one writer: token embedding, positions, attention output of layer l, MLP
+      output of layer l): its contribution to x_j -> its training mean (over inputs and
+      positions), folded into a bias (embedding -> W_pos column j; positions -> W_E column
+      j; attention -> b_O[l, j]; MLP -> b_2[l, j]); the writer's column j is deleted.
+  stream_mean on a touched coordinate j (payload j, no rotation): the global replacement
+      at the sites that still read x_j, then all writers of j deleted.  Exact when every
+      writer of j has been replaced by a constant (x_j is then constant at every site).
 New moves (NEW_KINDS):
   emb_rank / pos_rank / unemb_rank  rank cut of W_E / W_pos / W_U by her activation-weighted
       SVD (weights: group frequencies of the characters for W_E, uniform positions for
@@ -101,6 +108,7 @@ HER_KINDS = ("head_off", "head_mean", "head_mean_pos", "attn_uniform", "attn_fix
              "unit_sat", "unit_mean", "unit_merge")
 STREAM_KINDS = ("stream_mean",)
 STREAM_FINE_KINDS = ("stream_site", "stream_read")
+STREAM_WRITE_KINDS = ("stream_write",)
 NEW_KINDS = ("emb_rank", "pos_rank", "unemb_rank", "token_merge", "head_merge")
 # stream-indexed tensors -> axis of the stream index
 WRITERS = {"W_E": 1, "W_pos": 1, "W_O": 3, "b_O": 1, "B_attn": 2, "W_2": 1, "b_2": 1, "E_b": 1, "Pos_b": 1}
@@ -204,14 +212,25 @@ class GPTAdapter(Adapter):
         return s
 
     # ---- forward ---------------------------------------------------------------------------------------
-    def _forward(self, P, S, X, cache=False, replace=None, read_over=None):
+    def _forward(self, P, S, X, cache=False, replace=None, read_over=None, write_over=None):
         """replace = (j, ms): at every LayerNorm input k, coordinate j is replaced by its
         mean over X (computed on the fly, appended to ms) before the LayerNorm reads it;
         the stream itself keeps x_j.  Used only to compute the means of a stream move.
-        read_over = {(k, reader): (j, c)}: reader at site k sees n_j = c (tests only)."""
+        read_over = {(k, reader): (j, c)}: reader at site k sees n_j = c (tests only).
+        write_over = {writer: (j, mu)}: that writer's contribution to x_j is mu (tests only)."""
         n, T = X.shape
         causal = self.causal[:T, :T]
-        x = (P["W_E"] + P["E_a"] @ P["E_b"])[S["tok_group"][X]] + (P["W_pos"] + P["Pos_a"] @ P["Pos_b"])[:T]
+        wo = write_over or {}
+
+        def wover(w, contrib):
+            if w not in wo:
+                return contrib
+            j, mu = wo[w]
+            contrib = contrib.clone(); contrib[..., j] = mu
+            return contrib
+
+        x = wover("emb", (P["W_E"] + P["E_a"] @ P["E_b"])[S["tok_group"][X]]) \
+            + wover("pos", (P["W_pos"] + P["Pos_a"] @ P["Pos_b"])[:T].expand(n, T, -1))
         c = {"x": [], "s": [], "A": [], "ho": [], "act": []} if cache else None
 
         def read(x, k):
@@ -251,13 +270,13 @@ class GPTAdapter(Adapter):
                     z = z.clone()
                     z[:, fx] = torch.einsum("hts,bhse->bhte", S["A_fixed"][l][fx][:, :T, :T].to(v.dtype), v[:, fx])
                 attn_out = torch.einsum("bhte,hed->btd", z * alive_h, P["W_O"][l])
-            x = x + attn_out + P["b_O"][l] + P["B_attn"][l][:T]
+            x = x + wover(("attn", l), attn_out + P["b_O"][l] + P["B_attn"][l][:T])
             xr, s2 = read(x, 2 * l + 1)
             a = F.gelu((inp(xr, s2, 2 * l + 1, "W_1") @ P["W_1"][l].T + P["p1"][l]) / s2 + P["b_1"][l])
             a = a * (S["unit_type"][l] == ACTIVE).to(a.dtype)
             if cache:
                 c["x"].append(x); c["s"].append(s2); c["act"].append(a)
-            x = x + a @ P["W_2"][l].T + P["b_2"][l]
+            x = x + wover(("mlp", l), a @ P["W_2"][l].T + P["b_2"][l])
         xr, sf = read(x, 2 * self.L)
         if cache:
             c["x"].append(x); c["s"].append(sf)
@@ -489,6 +508,20 @@ class GPTAdapter(Adapter):
         return vecs
 
     @torch.no_grad()
+    def _stream_mean_coord(self, s, j):
+        """The global replacement on an existing (touched) coordinate j, no rotation."""
+        st = s.struct
+        if not (bool(st["stream_alive"][j]) and bool(st["touched"][j])) or int(st["stream_alive"].sum()) <= 1:
+            return False
+        ms = []
+        self._forward(self.effective(s), st, self.data["stats"][0], replace=(j, ms))
+        for k, m in enumerate(ms):
+            self._fold_site(s, k, j, m)
+        self._kill_coord(s, j, WRITERS)
+        st["stream_alive"][j] = False
+        return True
+
+    @torch.no_grad()
     def _stream_mean(self, s, u):
         alive, pr = s.struct["stream_alive"], self.pristine(s)
         if int(alive.sum()) <= 1 or int(pr.sum()) < 1:
@@ -605,6 +638,91 @@ class GPTAdapter(Adapter):
         st["touched"][j] = True
         return True
 
+    def writers(self):
+        return ["emb", "pos"] + [(t, l) for l in range(self.L) for t in ("attn", "mlp")]
+
+    def _writer_contrib(self, s, c, w):
+        """(n, T, d) contribution of writer w to the stream on the 'stats' windows."""
+        E = self.effective(s)
+        X = self.data["stats"][0]
+        if w == "emb":
+            return (E["W_E"] + E["E_a"] @ E["E_b"])[s.struct["tok_group"][X]]
+        if w == "pos":
+            return (E["W_pos"] + E["Pos_a"] @ E["Pos_b"])[: X.shape[1]].expand(X.shape[0], -1, -1)
+        t, l = w
+        if t == "attn":
+            return c["ho"][l].sum(1) + E["b_O"][l] + E["B_attn"][l][: X.shape[1]]
+        return c["act"][l] @ E["W_2"][l].T + E["b_2"][l]
+
+    def _writer_live(self, s, w):
+        m = s.masks
+        if w == "emb":
+            return m["W_E"].any(0) | m["E_b"].any(0)
+        if w == "pos":
+            return m["W_pos"].any(0) | m["Pos_b"].any(0)
+        t, l = w
+        if t == "attn":
+            return m["W_O"][l].any(0).any(0) | m["B_attn"][l].any(0)
+        return m["W_2"][l].any(1)
+
+    def write_candidates(self, s, c):
+        Lc = self.pristine(s).nonzero().flatten()
+        out = {}
+        for w in self.writers():
+            if len(Lc) < 1:
+                out[w] = [None] * self.n_site
+                continue
+            a = self._writer_contrib(s, c, w)[..., Lc].reshape(-1, len(Lc)).double()
+            a = a - a.mean(0)
+            _, E = torch.linalg.eigh(a.T @ a / len(a))
+            out[w] = [torch.zeros(self.d, dtype=torch.double).index_put_((Lc,), E[:, i]) if i < E.shape[1] else None
+                      for i in range(self.n_site)]
+        return out
+
+    @torch.no_grad()
+    def _stream_write(self, s, c, w, u=None, j=None):
+        st = s.struct
+        if u is not None:
+            vec = u
+        elif j is not None and bool(st["stream_alive"][j]) and bool(st["touched"][j]):
+            vec = torch.zeros(self.d, dtype=torch.double); vec[j] = 1
+        else:
+            return False
+        mu = float((self._writer_contrib(s, c, w).double() @ vec).mean())
+        if w == "pos" and not bool(s.masks["W_E"].any()):
+            return False                                   # no dense W_E column to take the constant
+        if u is not None:
+            j = self._to_coordinate(s, u)
+            if j is None:
+                return False
+        if not bool(self._writer_live(s, w)[j]):
+            return False
+        P, M = s.params, s.masks
+        if w == "emb":
+            P["W_pos"][:, j] = P["W_pos"][:, j] * M["W_pos"][:, j] + mu; M["W_pos"][:, j] = True
+            for n in ("W_E", "E_b"):
+                if bool(M[n][:, j].any()):
+                    self._zero(s, n, (slice(None), j))
+        elif w == "pos":
+            reps = st["tok_group"] == torch.arange(self.V)
+            P["W_E"][reps, j] = P["W_E"][reps, j] * M["W_E"][reps, j] + mu; M["W_E"][reps, j] = True
+            for n in ("W_pos", "Pos_b"):
+                if bool(M[n][:, j].any()):
+                    self._zero(s, n, (slice(None), j))
+        else:
+            t, l = w
+            if t == "attn":
+                P["b_O"][l, j] = mu; M["b_O"][l, j] = True
+                for n, idx in (("W_O", (l, slice(None), slice(None), j)), ("B_attn", (l, slice(None), j))):
+                    if bool(M[n][idx].any()):
+                        self._zero(s, n, idx)
+            else:
+                P["b_2"][l, j] = mu; M["b_2"][l, j] = True
+                if bool(M["W_2"][l, j].any()):
+                    self._zero(s, "W_2", (l, j))
+        st["touched"][j] = True
+        return True
+
     def _fold_site(self, s, k, j, m):
         P, Mk = s.params, s.masks
         if k < 2 * self.L:
@@ -629,8 +747,10 @@ class GPTAdapter(Adapter):
             for n in ("W_U", "U_a"):
                 if bool(Mk[n][j].any()):
                     self._zero(s, n, (j,))
-        P["M"][k] += m * m
-        Mk["M"][k] = True
+        if bool(s.struct["site_on"][k, j]):
+            P["M"][k] += m * m
+            Mk["M"][k] = True
+            s.struct["site_on"][k, j] = False
 
     # ---- rank cuts on the augmented inputs --------------------------------------------------------------
     @torch.no_grad()
@@ -831,6 +951,15 @@ class GPTAdapter(Adapter):
         for slot in range(self.n_pool + self.n_each * self.n_sites):
             mv.append(Move("stream_mean", "stream", 0, {"slot": slot}))
         alive_t = (st["stream_alive"] & st["touched"]).nonzero().flatten().tolist()
+        for wi, w in enumerate(self.writers()):
+            for i in range(self.n_site):
+                mv.append(Move("stream_write", f"write{wi}", 0, {"writer": wi, "slot": i}))
+            live = self._writer_live(s, w)
+            for j in alive_t:
+                if bool(live[j]):
+                    mv.append(Move("stream_write", f"write{wi}", 0, {"writer": wi, "j": j}))
+        for j in alive_t:
+            mv.append(Move("stream_mean", "stream", 0, {"j": j}))
         for k in range(self.n_sites):
             for i in range(self.n_site):
                 mv.append(Move("stream_site", f"site{k}", 0, {"site": k, "slot": i}))
@@ -859,7 +988,15 @@ class GPTAdapter(Adapter):
     def apply_structural(self, s, m):
         p, st, c = m.payload, s.struct, self._cur
         if m.kind == "stream_mean":
+            if "j" in p:
+                return self._stream_mean_coord(s, p["j"])
             return self._stream_mean(s, self.stream_candidates(s, c)[p["slot"]])
+        if m.kind == "stream_write":
+            w = self.writers()[p["writer"]]
+            if "slot" in p:
+                u = self.write_candidates(s, c)[w][p["slot"]]
+                return False if u is None else self._stream_write(s, c, w, u=u)
+            return self._stream_write(s, c, w, j=p["j"])
         if m.kind in STREAM_FINE_KINDS:
             k, name = p["site"], p.get("reader")
             if "slot" in p:
