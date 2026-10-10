@@ -11,6 +11,9 @@ tie-break fewest parameters then loss, admissibility off):
   S+stream+new | valA            + the new moves (gpt_adapter.NEW_KINDS)
   W+S+stream+new | valA | magnitude
   new only | valA
+  S+allstream+new | valA         + stream moves at every granularity (stream_site, stream_read)
+  W+S+allstream+new | valA | magnitude
+  allstream only | valA
 Stage 1 (exact folds) is applied first; frac_removed_orig counts from the trained model.
 Margins: the anchored valB test  mean dL <= 2 SE + rho * base val loss  is recorded with
 rho = 5% (tol_abs), and each run ends 50 steps after its first failure there (or at 97%
@@ -49,6 +52,12 @@ ARMS = {
     "W+S+stream+new | valA | magnitude": dict(weight_per_site=3,
                                               struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS),
     "new only | valA": dict(weight_per_site=0, struct_kinds=GA.NEW_KINDS),
+    # stream moves at every granularity (global, per LayerNorm site, per reader matrix)
+    "S+allstream+new | valA": dict(weight_per_site=0, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS
+                                   + GA.STREAM_FINE_KINDS + GA.NEW_KINDS),
+    "W+S+allstream+new | valA | magnitude": dict(weight_per_site=3, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS
+                                                 + GA.STREAM_FINE_KINDS + GA.NEW_KINDS),
+    "allstream only | valA": dict(weight_per_site=0, struct_kinds=GA.STREAM_KINDS + GA.STREAM_FINE_KINDS),
 }
 
 

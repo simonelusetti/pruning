@@ -62,7 +62,8 @@ def replaced_forward(s, u, X, Xstats):
             if k >= len(ms):
                 ms.append(m)
             xr = x - (x @ u)[..., None] * u + m * u
-            return xr, torch.sqrt((xr.pow(2).sum(-1, keepdim=True) + P["M"][k]) / 64 + G.EPS)
+            on = S["site_on"][k].float()
+            return xr, torch.sqrt(((xr.pow(2) * on).sum(-1, keepdim=True) + P["M"][k]) / 64 + G.EPS)
 
         for l in range(AD.L):
             xr, s1 = site(x, 2 * l)
@@ -111,7 +112,7 @@ def test_every_move_kind_applies():
         assert all(bool(torch.isfinite(v).all()) for v in s2.params.values())
         assert math.isfinite(AD.metrics(s2, "valA")["loss"])
         seen.add(m.kind)
-    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS)
+    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS + GA.STREAM_FINE_KINDS)
 
 
 def test_rank_cuts_after_stream_move():
@@ -226,6 +227,86 @@ def test_new_moves_after_stream_moves():
         assert s2 is not None and AD.k_eff(s2) < AD.k_eff(s), m.kind
         assert math.isfinite(AD.metrics(s2, "valA")["loss"]), m.kind
         s = s2
+
+
+
+
+
+# ---- stream moves at finer granularity -----------------------------------------------------------------
+
+def _touched(j=20):
+    s = S0.clone(); s.struct["touched"][j] = True                     # no functional change
+    return s
+
+
+def _means(s, k, j):
+    c = AD._stats(s)
+    x, sk = c["x"][k][..., j].double(), c["s"][k][..., 0].double()
+    return float((x / sk).mean()), float(x.pow(2).mean())
+
+
+def test_stream_read_exact_for_every_reader():
+    j = 20
+    for k in range(AD.n_sites):
+        for name, l in AD.site_readers(k):
+            s = _touched(j)
+            cval, _ = _means(s, k, j)
+            s2 = AD.apply(s, Move("stream_read", "t", 0, {"site": k, "reader": name, "j": j}))
+            ref = AD._forward(AD.effective(s), s.struct, X, read_over={(k, name): (j, cval)})[0]
+            assert float((logits(s2) - ref).abs().max()) < 1e-4, (k, name)
+            assert AD.k_eff(s) - AD.k_eff(s2) == {"W_Q": 64, "W_K": 64, "W_V": 64, "W_1": 256, "W_U": 65}[name]
+
+
+def test_stream_site_exact_for_every_site():
+    j = 20
+    for k in range(AD.n_sites):
+        s = _touched(j)
+        cval, second = _means(s, k, j)
+        s2 = AD.apply(s, Move("stream_site", "t", 0, {"site": k, "j": j}))
+        r = s.clone(); r.struct["site_on"][k, j] = False; r.params["M"][k] += second; r.masks["M"][k] = True
+        ref = AD._forward(AD.effective(r), r.struct, X, read_over={(k, n): (j, cval) for n, _ in AD.site_readers(k)})[0]
+        assert float((logits(s2) - ref).abs().max()) < 1e-4, k
+
+
+def test_writers_die_by_depth_and_exactly():
+    j = 20
+    s = _touched(j)
+    for k in (4, 3):                                    # final LayerNorm, then layer 1 ln2
+        s = AD.apply(s, Move("stream_site", "t", 0, {"site": k, "j": j}))
+    assert not bool(s.masks["W_2"][1, j].any()) and not bool(s.masks["b_2"][1, j])      # written after site 3
+    assert not bool(s.masks["W_O"][1, :, :, j].any())                 # layer-1 attention writes only into sites 3, 4
+    assert bool(s.masks["W_O"][0, :, :, j].any()) and bool(s.masks["W_2"][0, j].any())   # layer 0 still feeds site 2
+    for k in (2, 1, 0):
+        t = s.clone()
+        AD._stream_fine(t, AD._stats(s), "stream_site", k, j=j)            # the move without canonicalisation
+        z_before = logits(t)
+        AD.canonicalize(t)
+        assert float((logits(t) - z_before).abs().max()) < 1e-5, k           # deleting dead writers is exact
+        s = AD.apply(s, Move("stream_site", "t", 0, {"site": k, "j": j}))
+    assert not bool(s.struct["stream_alive"][j])
+    for n, ax in GA.STREAM_AX.items():
+        assert not bool(s.masks[n].select(ax, j).any()), n
+
+
+def test_slot_moves_rotate_only_pristine_coordinates():
+    s = AD.apply(_touched(20), Move("stream_read", "t", 0, {"site": 1, "reader": "W_1", "j": 20}))
+    masks20 = {n: s.masks[n].select(ax, 20).clone() for n, ax in GA.STREAM_AX.items()}
+    for kind, p in (("stream_site", {"site": 2, "slot": 0}), ("stream_read", {"site": 0, "reader": "W_V", "slot": 0}),
+                    ("stream_mean", {"slot": 0})):
+        s2 = AD.apply(s, Move(kind, "t", 0, p))
+        assert s2 is not None and AD.k_eff(s2) < AD.k_eff(s), kind
+        for n, ax in GA.STREAM_AX.items():
+            assert torch.equal(s2.masks[n].select(ax, 20), masks20[n]), (kind, n)
+
+
+def test_global_move_exact_after_fine_moves():
+    s = AD.apply(_touched(20), Move("stream_site", "t", 0, {"site": 3, "j": 20}))
+    s = AD.apply(s, Move("stream_read", "t", 0, {"site": 0, "reader": "W_K", "slot": 0}))
+    c = AD._stats(s)
+    u = AD.stream_candidates(s, c)[0]
+    s2 = AD.apply(s, Move("stream_mean", "stream", 0, {"slot": 0}))
+    ref = replaced_forward(s, u, X, AD.data["stats"][0])
+    assert float((logits(s2) - ref).abs().max()) < 1e-4 * float(ref.abs().max())
 
 
 if __name__ == "__main__":
