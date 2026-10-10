@@ -363,22 +363,161 @@ class GPTAdapter(Adapter):
         m = s.masks
         return (m["W_V"][l, h].any(0) | m["pV"][l, h]) & m["W_O"][l, h].any(1)
 
-    # ---- canonicalisation (her rules + the stream rules) ------------------------------------------------
+    # ---- ownership graph and canonicalisation ---------------------------------------------------------------
+    #
+    # Every live parameter entry belongs to exactly one node.  Nodes come in families; each family
+    # states, for all of its nodes at once, when a node is unused (no live consumer) or unfed (no
+    # live input), and what happens then: its entries are deleted, or (unit without fan-in) its
+    # constant output is folded into the consumer's bias first.  canonicalize() applies every family
+    # until none changes anything, so cascades across node types need no hand-written order.
+    # A move only edits its own entries; a move that introduces a new kind of shared object adds a
+    # family here.  is_canonical() is the invariant: no family would change the state.
+    #
+    #   family            node                    consumer / input                         rule
+    #   dead_stream       dead stream coordinate  -                                        delete every entry on it
+    #   factors           factor dimension k      a[:, k] and b[k, :] both live            else delete both sides
+    #   qk_dims           head dimension (QK)     query side and key side both live        else delete both sides
+    #   ov_dims           head dimension (OV)     value side and W_O row both live         else delete both sides
+    #   heads             head                    some OV dimension live; fixed head: no QK  else delete the head
+    #   units             MLP unit                fan-out live / fan-in live               delete / fold GELU(b) into b_2
+    #   writer_columns    writer column j         a site after the writer reads x_j        else delete the column
+    #   unwritten         stream coordinate       some writer entry live                   else x_j = 0: delete readers
+
+    def _families(self):
+        return (self._f_dead_stream, self._f_factors, self._f_qk_dims, self._f_ov_dims, self._f_heads,
+                self._f_units, self._f_writer_columns, self._f_unwritten)
+
     def canonicalize(self, s):
-        self._remask_dead(s)
-        self._factors(s)
-        self._heads(s)
-        self._units(s)
+        for _ in range(100):
+            changed = False
+            for fam in self._families():
+                changed |= bool(fam(s))
+            if not changed:
+                return
+        raise RuntimeError("canonicalisation did not reach a fixed point")
+
+    def is_canonical(self, s):
+        """True if no family would change s (checked on a copy)."""
+        t = s.clone()
+        return not any(bool(fam(t)) for fam in self._families())
+
+    @staticmethod
+    def _kill(s, name, mask):
+        """Delete the live entries of `name` selected by the bool `mask`; return whether any were live."""
+        sel = mask & s.masks[name]
+        if bool(sel.any()):
+            zero_entries(s, name, sel)
+            return True
+        return False
+
+    def _f_dead_stream(self, s):
+        dead = ~s.struct["stream_alive"]
+        changed = False
+        if bool(dead.any()):
+            for n, ax in STREAM_AX.items():
+                shape = [1] * s.masks[n].dim(); shape[ax] = -1
+                changed |= self._kill(s, n, dead.view(shape).expand_as(s.masks[n]))
+        return changed
+
+    def _f_factors(self, s):
+        changed = False
+        for a, b in (("E_a", "E_b"), ("Pos_a", "Pos_b"), ("U_a", "U_b")):
+            live = s.masks[a].any(0) & s.masks[b].any(1)
+            changed |= self._kill(s, a, (~live)[None, :].expand_as(s.masks[a]))
+            changed |= self._kill(s, b, (~live)[:, None].expand_as(s.masks[b]))
+        return changed
+
+    def _f_qk_dims(self, s):
+        changed = False
+        for l in range(self.L):
+            for h in range(self.H):
+                if not bool(s.struct["head_alive"][l, h]):
+                    continue
+                dead = ~self.qk_dims(s, l, h)
+                if bool(s.struct["head_fixed"][l, h]):
+                    dead = torch.ones_like(dead)                # a fixed pattern has no QK consumer
+                if not bool(dead.any()):
+                    continue
+                for n in ("W_Q", "W_K"):
+                    mk = torch.zeros_like(s.masks[n]); mk[l, h] = dead[None, :]
+                    changed |= self._kill(s, n, mk)
+                for n in ("b_Q", "pQ", "pK"):
+                    mk = torch.zeros_like(s.masks[n]); mk[l, h] = dead
+                    changed |= self._kill(s, n, mk)
+        return changed
+
+    def _f_ov_dims(self, s):
+        changed = False
+        for l in range(self.L):
+            for h in range(self.H):
+                if not bool(s.struct["head_alive"][l, h]):
+                    continue
+                dead = ~self.ov_dims(s, l, h)
+                if not bool(dead.any()):
+                    continue
+                mk = torch.zeros_like(s.masks["W_V"]); mk[l, h] = dead[None, :]
+                changed |= self._kill(s, "W_V", mk)
+                mk = torch.zeros_like(s.masks["pV"]); mk[l, h] = dead
+                changed |= self._kill(s, "pV", mk)
+                mk = torch.zeros_like(s.masks["W_O"]); mk[l, h] = dead[:, None]
+                changed |= self._kill(s, "W_O", mk)
+        return changed
+
+    def _f_heads(self, s):
+        changed = False
         st = s.struct
-        alive = st["stream_alive"]
-        self._writer_death(s)
+        for l in range(self.L):
+            for h in range(self.H):
+                if bool(st["head_alive"][l, h]) and bool(self.ov_dims(s, l, h).any()):
+                    continue
+                if bool(st["head_alive"][l, h]) or any(bool(s.masks[n][l, h].any()) for n in HEAD_T):
+                    self._kill_head(s, l, h)
+                    changed = True
+        return changed
+
+    def _f_units(self, s):
+        changed = False
+        for l in range(self.L):
+            t = s.struct["unit_type"][l]
+            fan_out = s.masks["W_2"][l].any(0)
+            for i in ((t == ACTIVE) & ~fan_out).nonzero().flatten().tolist():
+                self._kill_unit(s, l, i); changed = True
+            fan_in = s.masks["W_1"][l].any(1) | s.masks["p1"][l]
+            for i in ((s.struct["unit_type"][l] == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
+                b = s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i]) else torch.tensor(0.0)
+                self._fold_unit(s, l, i, float(F.gelu(b))); changed = True
+        return changed
+
+    def _f_writer_columns(self, s):
+        reads_after = [None] * (self.n_sites + 1)
+        reads_after[self.n_sites] = torch.zeros(self.d, dtype=torch.bool)
+        for k in range(self.n_sites - 1, -1, -1):
+            reads_after[k] = reads_after[k + 1] | self._reads_at(s, k)
+        groups = [(n, None, 0) for n in ("W_E", "W_pos", "E_b", "Pos_b")]
+        for l in range(self.L):
+            groups += [(n, l, 2 * l + 1) for n in ("W_O", "b_O", "B_attn")] + [(n, l, 2 * l + 2) for n in ("W_2", "b_2")]
+        changed = False
+        for n, l, k0 in groups:
+            dead = ~reads_after[k0]
+            ax = WRITERS[n]
+            shape = [1] * s.masks[n].dim(); shape[ax] = -1
+            mk = dead.view(shape).expand_as(s.masks[n]).clone()
+            if l is not None:
+                keep = torch.zeros_like(mk); keep[l] = True
+                mk &= keep
+            changed |= self._kill(s, n, mk)
+        return changed
+
+    def _f_unwritten(self, s):
+        alive = s.struct["stream_alive"]
         written = torch.zeros(self.d, dtype=torch.bool)
         for n, ax in WRITERS.items():
             written |= _along(s.masks[n], ax)
+        changed = False
         for j in (alive & ~written).nonzero().flatten().tolist():
             self._kill_coord(s, j, READERS); alive[j] = False
-        self._heads(s)
-        self._units(s)
+            changed = True
+        return changed
 
     def site_readers(self, k):
         if k == 2 * self.L:
@@ -400,88 +539,6 @@ class GPTAdapter(Adapter):
         for name, l in self.site_readers(k):
             r |= self._row_live(s, name, l)
         return r & s.struct["stream_alive"]
-
-    def _writer_death(self, s):
-        """Delete a writer's column j when no site after the writer reads x_j."""
-        reads_after = [None] * (self.n_sites + 1)
-        reads_after[self.n_sites] = torch.zeros(self.d, dtype=torch.bool)
-        for k in range(self.n_sites - 1, -1, -1):
-            reads_after[k] = reads_after[k + 1] | self._reads_at(s, k)
-        groups = [(n, None, 0) for n in ("W_E", "W_pos", "E_b", "Pos_b")]
-        for l in range(self.L):
-            groups += [(n, l, 2 * l + 1) for n in ("W_O", "b_O", "B_attn")] + [(n, l, 2 * l + 2) for n in ("W_2", "b_2")]
-        for n, l, k0 in groups:
-            dead = ~reads_after[k0]
-            m = s.masks[n] if l is None else s.masks[n][l]
-            ax = WRITERS[n] - (0 if l is None else 1)
-            if bool((_along(m, ax) & dead).any()):
-                shape = [1] * m.dim(); shape[ax] = -1
-                mk = torch.zeros_like(s.masks[n])
-                if l is None:
-                    mk |= dead.view(shape) & m
-                else:
-                    mk[l] = dead.view(shape) & m
-                zero_entries(s, n, mk)
-
-    def _factors(self, s):
-        """A factor dimension is live only if both its column of a and its row of b are."""
-        for a, b in (("E_a", "E_b"), ("Pos_a", "Pos_b"), ("U_a", "U_b")):
-            live = s.masks[a].any(0) & s.masks[b].any(1)
-            if bool((s.masks[a].any(0) & ~live).any()):
-                zero_entries(s, a, s.masks[a] & ~live[None, :])
-            if bool((s.masks[b].any(1) & ~live).any()):
-                zero_entries(s, b, s.masks[b] & ~live[:, None])
-
-    def _remask_dead(self, s):
-        dead = ~s.struct["stream_alive"]
-        if not bool(dead.any()):
-            return
-        for n, ax in STREAM_AX.items():
-            if bool((_along(s.masks[n], ax) & dead).any()):
-                shape = [1] * s.masks[n].dim(); shape[ax] = -1
-                zero_entries(s, n, (dead.view(shape) & s.masks[n]))
-
-    def _heads(self, s):
-        st = s.struct
-        for l in range(self.L):
-            for h in range(self.H):
-                if not bool(st["head_alive"][l, h]):
-                    if any(bool(s.masks[n][l, h].any()) for n in HEAD_T):
-                        self._kill_head(s, l, h)
-                    continue
-                qk, ov = self.qk_dims(s, l, h), self.ov_dims(s, l, h)
-                for e in (~qk).nonzero().flatten().tolist():
-                    for n in ("W_Q", "W_K"):
-                        if bool(s.masks[n][l, h, :, e].any()):
-                            self._zero(s, n, (l, h, slice(None), e))
-                    for n in ("b_Q", "pQ", "pK"):
-                        if bool(s.masks[n][l, h, e]):
-                            self._zero(s, n, (l, h, e))
-                for e in (~ov).nonzero().flatten().tolist():
-                    if bool(s.masks["W_V"][l, h, :, e].any()):
-                        self._zero(s, "W_V", (l, h, slice(None), e))
-                    if bool(s.masks["pV"][l, h, e]):
-                        self._zero(s, "pV", (l, h, e))
-                    if bool(s.masks["W_O"][l, h, e].any()):
-                        self._zero(s, "W_O", (l, h, e))
-                if not bool(ov.any()):
-                    self._kill_head(s, l, h)
-                elif bool(st["head_fixed"][l, h]) and bool(qk.any()):
-                    self._zero_qk(s, l, h)
-
-    def _units(self, s):
-        changed = True
-        while changed:
-            changed = False
-            for l in range(self.L):
-                t = s.struct["unit_type"][l]
-                fan_out = s.masks["W_2"][l].any(0)
-                fan_in = s.masks["W_1"][l].any(1) | s.masks["p1"][l]
-                for i in ((t == ACTIVE) & ~fan_out).nonzero().flatten().tolist():
-                    self._kill_unit(s, l, i); changed = True
-                for i in ((s.struct["unit_type"][l] == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                    b = s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i]) else torch.tensor(0.0)
-                    self._fold_unit(s, l, i, float(F.gelu(b))); changed = True
 
     # ---- stream move ------------------------------------------------------------------------------------
     def stream_candidates(self, s, c):

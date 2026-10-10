@@ -344,6 +344,45 @@ def test_constant_coordinate_is_removed_exactly():
     assert not bool(s2.struct["stream_alive"][j]) and AD.k_eff(s2) < AD.k_eff(s)
 
 
+# ---- ownership graph ----------------------------------------------------------------------------------------
+
+def test_stage1_state_is_canonical():
+    assert AD.is_canonical(S0)
+
+
+def test_random_mixed_move_sequences_stay_canonical():
+    """Long random sequences of every move kind, interleaved: after each move the state must be a
+    fixed point of every node family, k_eff must drop, and the network must stay finite."""
+    import random
+    from nnprune.core import weight_candidates
+    kinds = set(GA.HER_KINDS + GA.STREAM_KINDS + GA.STREAM_FINE_KINDS + GA.STREAM_WRITE_KINDS + GA.NEW_KINDS)
+    wcfg = PruneConfig(verbose=False, weight_score="magnitude", weight_chunk=64, weight_per_site=2, n_merge=4)
+    Xs = X[:32]
+    for seed in range(3):
+        rng = random.Random(seed)
+        s, seen = S0, set()
+        for step in range(30):
+            ctx = AD.refresh_extra(s, wcfg)
+            moves = [m for m in AD.structural_moves(s, ctx, wcfg) if m.kind in kinds]
+            moves += weight_candidates(AD, s, ctx, wcfg)
+            by_kind = {}
+            for m in moves:
+                by_kind.setdefault(m.kind, []).append(m)
+            for _ in range(10):                       # a random kind, then a random move of that kind
+                m = rng.choice(by_kind[rng.choice(sorted(by_kind))])
+                s2 = AD.apply(s, m)
+                if s2 is not None and AD.k_eff(s2) < AD.k_eff(s):
+                    break
+            else:
+                continue
+            assert AD.is_canonical(s2), (seed, step, m.kind)
+            z = AD.logits(AD.effective(s2), s2.struct, Xs)
+            assert bool(torch.isfinite(z).all()), (seed, step, m.kind)
+            seen.add(m.kind)
+            s = s2
+        assert len(seen) >= 8, seen
+
+
 if __name__ == "__main__":
     import time
     for n in [n for n in dir() if n.startswith("test_")]:
