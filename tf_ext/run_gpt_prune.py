@@ -11,7 +11,7 @@ tie-break fewest parameters then loss, admissibility off):
   S+stream+new | valA            + the new moves (gpt_adapter.NEW_KINDS)
   W+S+stream+new | valA | magnitude
   new only | valA
-  S+allstream+new | valA         + stream moves at every granularity (stream_site, stream_read)
+  S+allstream+new | valA         + stream moves at every granularity (stream_site, stream_read, stream_write)
   W+S+allstream+new | valA | magnitude
   allstream only | valA
 Stage 1 (exact folds) is applied first; frac_removed_orig counts from the trained model.
@@ -52,12 +52,13 @@ ARMS = {
     "W+S+stream+new | valA | magnitude": dict(weight_per_site=3,
                                               struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS),
     "new only | valA": dict(weight_per_site=0, struct_kinds=GA.NEW_KINDS),
-    # stream moves at every granularity (global, per LayerNorm site, per reader matrix)
+    # stream moves at every granularity: global, per LayerNorm site, per reader matrix, per writer
     "S+allstream+new | valA": dict(weight_per_site=0, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS
-                                   + GA.STREAM_FINE_KINDS + GA.NEW_KINDS),
+                                   + GA.STREAM_FINE_KINDS + GA.STREAM_WRITE_KINDS + GA.NEW_KINDS),
     "W+S+allstream+new | valA | magnitude": dict(weight_per_site=3, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS
-                                                 + GA.STREAM_FINE_KINDS + GA.NEW_KINDS),
-    "allstream only | valA": dict(weight_per_site=0, struct_kinds=GA.STREAM_KINDS + GA.STREAM_FINE_KINDS),
+                                                 + GA.STREAM_FINE_KINDS + GA.STREAM_WRITE_KINDS + GA.NEW_KINDS),
+    "allstream only | valA": dict(weight_per_site=0, struct_kinds=GA.STREAM_KINDS + GA.STREAM_FINE_KINDS
+                                  + GA.STREAM_WRITE_KINDS),
 }
 
 
