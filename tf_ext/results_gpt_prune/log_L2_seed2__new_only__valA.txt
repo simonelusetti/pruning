@@ -1,0 +1,10 @@
+L=2 seed 2: p = 110529, after Stage 1 k = 107931 (2598 removed exactly, max |logit change| 4.0e-05); val loss 1.5903
+[L2 s2 new only | valA] step    10  k_eff 107087 (  0.8% removed)  val 1.5899  test 1.8579  last=pos_rank[pos] {}  ties 1/8  150s
+[L2 s2 new only | valA] step    20  k_eff 106105 (  1.7% removed)  val 1.6441  test 1.8963  last=unemb_rank[unemb] {}  ties 1/8  290s
+[L2 s2 new only | valA] step    30  k_eff 104890 (  2.8% removed)  val 1.7570  test 1.9900  last=unemb_rank[unemb] {}  ties 1/8  459s
+[L2 s2 new only | valA] step    40  k_eff 103610 (  4.0% removed)  val 2.0348  test 2.1903  last=unemb_rank[unemb] {}  ties 1/8  610s
+[L2 s2 new only | valA] step    50  k_eff 102540 (  5.0% removed)  val 2.2666  test 2.3419  last=emb_rank[emb] {}  ties 1/8  776s
+[L2 s2 new only | valA] step    60  k_eff  93438 ( 13.4% removed)  val 2.7449  test 2.7830  last=unemb_rank[unemb] {}  ties 1/3  913s
+[L2 s2 new only | valA] step    70  k_eff  84783 ( 21.4% removed)  val 2.9898  test 3.0039  last=pos_rank[pos] {}  ties 1/2  1060s
+DONE L=2 seed 2 new only | valA: 75 steps, 23.8% removed, 1135s
+ALL DONE L=2 seed 2

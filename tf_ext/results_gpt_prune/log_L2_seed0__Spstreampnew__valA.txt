@@ -1,0 +1,24 @@
+L=2 seed 0: p = 110529, after Stage 1 k = 107931 (2598 removed exactly, max |logit change| 4.9e-05); val loss 1.5837
+[L2 s0 S+stream+new | valA] step    10  k_eff 106661 (  1.2% removed)  val 1.5831  test 1.8254  last=unit_mean[mlp1] {'l': 1, 'i': 42}  ties 5/7  422s
+[L2 s0 S+stream+new | valA] step    20  k_eff 105455 (  2.3% removed)  val 1.5835  test 1.8264  last=qk_rank[L1h0] {'l': 1, 'h': 0}  ties 22/22  883s
+[L2 s0 S+stream+new | valA] step    30  k_eff 104185 (  3.5% removed)  val 1.5834  test 1.8259  last=qk_rank[L1h0] {'l': 1, 'h': 0}  ties 22/22  1079s
+[L2 s0 S+stream+new | valA] step    40  k_eff 102915 (  4.6% removed)  val 1.5833  test 1.8255  last=qk_rank[L1h3] {'l': 1, 'h': 3}  ties 18/20  1351s
+[L2 s0 S+stream+new | valA] step    50  k_eff 101911 (  5.6% removed)  val 1.5835  test 1.8258  last=qk_rank[L1h2] {'l': 1, 'h': 2}  ties 4/4  1449s
+[L2 s0 S+stream+new | valA] step    60  k_eff 100641 (  6.8% removed)  val 1.5831  test 1.8228  last=unit_mean[mlp1] {'l': 1, 'i': 237}  ties 9/12  1685s
+[L2 s0 S+stream+new | valA] step    70  k_eff  99371 (  7.9% removed)  val 1.5843  test 1.8247  last=qk_rank[L1h2] {'l': 1, 'h': 2}  ties 6/6  1771s
+[L2 s0 S+stream+new | valA] step    80  k_eff  98101 (  9.1% removed)  val 1.5854  test 1.8223  last=qk_rank[L0h0] {'l': 0, 'h': 0}  ties 12/16  2011s
+[L2 s0 S+stream+new | valA] step    90  k_eff  96832 ( 10.3% removed)  val 1.5880  test 1.8232  last=ov_rank[L0h0] {'l': 0, 'h': 0}  ties 4/12  2110s
+[L2 s0 S+stream+new | valA] step   100  k_eff  95567 ( 11.5% removed)  val 1.5936  test 1.8315  last=ov_rank[L0h2] {'l': 0, 'h': 2}  ties 3/18  2365s
+[L2 s0 S+stream+new | valA] step   110  k_eff  94555 ( 12.4% removed)  val 1.5937  test 1.8285  last=pos_rank[pos] {}  ties 1/18  2483s
+[L2 s0 S+stream+new | valA] step   120  k_eff  93413 ( 13.5% removed)  val 1.5988  test 1.8297  last=qk_rank[L1h0] {'l': 1, 'h': 0}  ties 11/21  2745s
+[L2 s0 S+stream+new | valA] step   130  k_eff  92143 ( 14.6% removed)  val 1.6061  test 1.8377  last=qk_rank[L1h3] {'l': 1, 'h': 3}  ties 7/18  2869s
+[L2 s0 S+stream+new | valA] step   140  k_eff  90873 ( 15.8% removed)  val 1.6178  test 1.8506  last=qk_rank[L0h3] {'l': 0, 'h': 3}  ties 8/20  3121s
+[L2 s0 S+stream+new | valA] step   150  k_eff  89606 ( 17.0% removed)  val 1.6352  test 1.8663  last=qk_rank[L1h1] {'l': 1, 'h': 1}  ties 8/15  3238s
+[L2 s0 S+stream+new | valA] step   160  k_eff  88400 ( 18.1% removed)  val 1.6517  test 1.8763  last=qk_rank[L0h2] {'l': 0, 'h': 2}  ties 10/17  3482s
+[L2 s0 S+stream+new | valA] step   170  k_eff  87131 ( 19.3% removed)  val 1.6724  test 1.8850  last=qk_rank[L0h2] {'l': 0, 'h': 2}  ties 6/9  3583s
+[L2 s0 S+stream+new | valA] step   180  k_eff  85992 ( 20.3% removed)  val 1.6806  test 1.8913  last=unit_mean[mlp1] {'l': 1, 'i': 23}  ties 11/14  3820s
+[L2 s0 S+stream+new | valA] step   190  k_eff  84725 ( 21.5% removed)  val 1.7023  test 1.9094  last=ov_rank[L0h3] {'l': 0, 'h': 3}  ties 5/6  3910s
+[L2 s0 S+stream+new | valA] step   200  k_eff  83457 ( 22.7% removed)  val 1.7177  test 1.9263  last=unit_mean[mlp1] {'l': 1, 'i': 208}  ties 12/17  4063s
+[L2 s0 S+stream+new | valA] step   210  k_eff  82187 ( 23.9% removed)  val 1.7397  test 1.9466  last=unit_mean[mlp1] {'l': 1, 'i': 98}  ties 4/8  4121s
+DONE L=2 seed 0 S+stream+new | valA: 218 steps, 26.5% removed, 4270s
+ALL DONE L=2 seed 0
