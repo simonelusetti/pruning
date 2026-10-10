@@ -45,6 +45,24 @@ stream_mean (ours, through the exact LayerNorm route): rotate the stream so that
   'fresh slots': the smallest eigen-directions of the pooled (n_pool) and per-site
   (n_each) centred covariances of the LayerNorm inputs, recomputed when applied.
 Single weights ('zero', chunks of 64) on every matrix, as in her W+S arms.
+New moves (NEW_KINDS):
+  emb_rank / pos_rank / unemb_rank  rank cut of W_E / W_pos / W_U by her activation-weighted
+      SVD (weights: group frequencies of the characters for W_E, uniform positions for
+      W_pos, the covariance of the final normalised stream x/s for W_U; identity on the
+      output side).  Factors are counted as r (rows + cols), as her qk/ov factors are, so
+      the first cut of a dense matrix jumps to the largest rank at which the factors are
+      cheaper than the dense matrix; later cuts remove one rank.
+  token_merge (the realisation of 'token_mean')  character c joins the group of c2: the
+      group shares one embedding, the frequency-weighted mean of the two groups' vectors
+      (the L2 projection, as in unit_merge); c's row is freed.  A plain 'replace c by a
+      stored mean vector' frees nothing the first time (the mean costs a row), so her rule
+      would never take it.  Candidates: the n_tok pairs of group representatives with the
+      smallest  f1 f2 / (f1 + f2) |E1 - E2|^2.
+  head_merge  heads h, h2 of one layer with similar patterns: h is deleted and h2, keeping
+      its own pattern, gets the summed value-output map  N_h + N_h2  (on the augmented
+      inputs), compressed to r = min(d_h, rank_h + rank_h2) by her ov_rank SVD weighted by
+      the inputs averaged with h2's pattern (exact when the patterns are equal and the
+      ranks fit in d_h).  All ordered pairs of live heads are candidates.
 """
 from __future__ import annotations
 
@@ -65,9 +83,12 @@ import gpt_toy as G  # noqa: E402
 HER_KINDS = ("head_off", "head_mean", "head_mean_pos", "attn_uniform", "attn_fixed", "qk_rank", "ov_rank",
              "unit_sat", "unit_mean", "unit_merge")
 STREAM_KINDS = ("stream_mean",)
+NEW_KINDS = ("emb_rank", "pos_rank", "unemb_rank", "token_merge", "head_merge")
 # stream-indexed tensors -> axis of the stream index
-WRITERS = {"W_E": 1, "W_pos": 1, "W_O": 3, "b_O": 1, "B_attn": 2, "W_2": 1, "b_2": 1}
-READERS = {"W_Q": 2, "W_K": 2, "W_V": 2, "W_1": 2, "W_U": 0}
+WRITERS = {"W_E": 1, "W_pos": 1, "W_O": 3, "b_O": 1, "B_attn": 2, "W_2": 1, "b_2": 1, "E_b": 1, "Pos_b": 1}
+READERS = {"W_Q": 2, "W_K": 2, "W_V": 2, "W_1": 2, "W_U": 0, "U_a": 0}
+FACTORS = {"emb_rank": ("W_E", "E_a", "E_b"), "pos_rank": ("W_pos", "Pos_a", "Pos_b"),
+           "unemb_rank": ("W_U", "U_a", "U_b")}
 STREAM_AX = {**WRITERS, **READERS}
 HEAD_T = ("W_Q", "W_K", "W_V", "W_O", "b_Q", "pQ", "pK", "pV")
 
@@ -77,11 +98,12 @@ def make_data(seed=0, n_train=2048, n_stats=512, n_valA=512):
     T = G.GPTConfig().T
     Xtr, Ytr = G.windows(text["train"], T, n=n_train, seed=seed)
     Xva, Yva = G.windows(text["val"], T)
+    freq = torch.bincount(text["train"], minlength=G.GPTConfig().V).double()
     perm = torch.randperm(len(Yva), generator=torch.Generator().manual_seed(1000 + seed))
     h = len(Yva) // 2
     return {"train": (Xtr, Ytr), "stats": (Xtr[:n_stats], Ytr[:n_stats]), "val": (Xva, Yva),
             "valA": (Xva[perm[:n_valA]], Yva[perm[:n_valA]]), "valB": (Xva[perm[h:]], Yva[perm[h:]]),
-            "test": G.windows(text["test"], T)}
+            "test": G.windows(text["test"], T), "freq": freq / freq.sum()}
 
 
 def _rot(t, ax, R):
@@ -108,12 +130,12 @@ class GPTAdapter(Adapter):
     prunable = ["W_E", "W_pos", "W_Q", "W_K", "W_V", "W_O", "W_1", "W_2", "W_U"]
     site_layer = {n: i for i, n in enumerate(prunable)}       # only used by the 'layer' tie-breaks
 
-    def __init__(self, data, cfg: G.GPTConfig, n_pool=6, n_each=1):
+    def __init__(self, data, cfg: G.GPTConfig, n_pool=6, n_each=1, n_tok=16):
         super().__init__(data)
         self.cfg = cfg
         self.L, self.H, self.d, self.dh, self.dm, self.T, self.V = cfg.L, cfg.H, cfg.d, cfg.dh, cfg.d_mlp, cfg.T, cfg.V
         self.causal = torch.tril(torch.ones(cfg.T, cfg.T, dtype=torch.bool))
-        self.n_pool, self.n_each = n_pool, n_each
+        self.n_pool, self.n_each, self.n_tok = n_pool, n_each, n_tok
         self.n_sites = 2 * cfg.L + 1
         self._cache_state, self._cache, self._cur = None, None, None
 
@@ -143,13 +165,16 @@ class GPTAdapter(Adapter):
             "pV": torch.zeros(L, H, self.dh, dtype=torch.double), "p1": torch.zeros(L, self.dm, dtype=torch.double),
             "pU": torch.zeros(self.V, dtype=torch.double), "M": torch.zeros(self.n_sites, dtype=torch.double),
             "B_attn": torch.zeros(L, T, d, dtype=torch.double),
+            "E_a": torch.zeros(self.V, d, dtype=torch.double), "E_b": torch.zeros(d, d, dtype=torch.double),
+            "Pos_a": torch.zeros(T, T, dtype=torch.double), "Pos_b": torch.zeros(T, d, dtype=torch.double),
+            "U_a": torch.zeros(d, d, dtype=torch.double), "U_b": torch.zeros(d, self.V, dtype=torch.double),
         }
         masks = {k: torch.ones_like(v, dtype=torch.bool) for k, v in Q.items()}
-        for k in ("pQ", "pK", "pV", "p1", "pU", "M", "B_attn"):
+        for k in ("pQ", "pK", "pV", "p1", "pU", "M", "B_attn", "E_a", "E_b", "Pos_a", "Pos_b", "U_a", "U_b"):
             masks[k][:] = False
         struct = {"head_alive": torch.ones(L, H, dtype=torch.bool), "head_fixed": torch.zeros(L, H, dtype=torch.bool),
                   "A_fixed": torch.zeros(L, H, T, T), "unit_type": torch.full((L, self.dm), ACTIVE, dtype=torch.int8),
-                  "stream_alive": torch.ones(d, dtype=torch.bool)}
+                  "stream_alive": torch.ones(d, dtype=torch.bool), "tok_group": torch.arange(self.V)}
         s = State(Q, masks, struct)
         one = torch.full((d,), 1 / math.sqrt(d), dtype=torch.double)
         self._rotate(s, householder(one, d - 1, d))
@@ -166,7 +191,7 @@ class GPTAdapter(Adapter):
         the stream itself keeps x_j.  Used only to compute the means of a stream move."""
         n, T = X.shape
         causal = self.causal[:T, :T]
-        x = P["W_E"][X] + P["W_pos"][:T]
+        x = (P["W_E"] + P["E_a"] @ P["E_b"])[S["tok_group"][X]] + (P["W_pos"] + P["Pos_a"] @ P["Pos_b"])[:T]
         c = {"x": [], "s": [], "A": [], "ho": [], "act": []} if cache else None
 
         def read(x, k):
@@ -207,7 +232,7 @@ class GPTAdapter(Adapter):
         xr, sf = read(x, 2 * self.L)
         if cache:
             c["x"].append(x); c["s"].append(sf)
-        return (xr @ P["W_U"] + P["pU"]) / sf + P["b_U"], c
+        return (xr @ (P["W_U"] + P["U_a"] @ P["U_b"]) + P["pU"]) / sf + P["b_U"], c
 
     def logits(self, P, S, X):
         return torch.cat([self._forward(P, S, X[i:i + 1024])[0] for i in range(0, len(X), 1024)])
@@ -288,6 +313,7 @@ class GPTAdapter(Adapter):
     # ---- canonicalisation (her rules + the stream rules) ------------------------------------------------
     def canonicalize(self, s):
         self._remask_dead(s)
+        self._factors(s)
         self._heads(s)
         self._units(s)
         st = s.struct
@@ -304,6 +330,15 @@ class GPTAdapter(Adapter):
             self._kill_coord(s, j, READERS); alive[j] = False
         self._heads(s)
         self._units(s)
+
+    def _factors(self, s):
+        """A factor dimension is live only if both its column of a and its row of b are."""
+        for a, b in (("E_a", "E_b"), ("Pos_a", "Pos_b"), ("U_a", "U_b")):
+            live = s.masks[a].any(0) & s.masks[b].any(1)
+            if bool((s.masks[a].any(0) & ~live).any()):
+                zero_entries(s, a, s.masks[a] & ~live[None, :])
+            if bool((s.masks[b].any(1) & ~live).any()):
+                zero_entries(s, b, s.masks[b] & ~live[:, None])
 
     def _remask_dead(self, s):
         dead = ~s.struct["stream_alive"]
@@ -417,10 +452,13 @@ class GPTAdapter(Adapter):
                     if bool(live.any()):
                         self._zero(s, W, (l, slice(None), j))
         else:
-            Wj, live = P["W_U"][j] * Mk["W_U"][j], Mk["W_U"][j]
+            E = self.effective(s)
+            Wj = E["W_U"][j] + E["U_a"][j] @ E["U_b"]
+            live = Mk["W_U"][j] | (Mk["U_a"][j][:, None] & Mk["U_b"]).any(0)
             P["pU"] += m * Wj; Mk["pU"] |= live
-            if bool(live.any()):
-                self._zero(s, "W_U", (j,))
+            for n in ("W_U", "U_a"):
+                if bool(Mk[n][j].any()):
+                    self._zero(s, n, (j,))
         P["M"][k] += m * m
         Mk["M"][k] = True
 
@@ -472,6 +510,99 @@ class GPTAdapter(Adapter):
             s.params[n][l, h][:r] = F_[len(Lc) + i]
             s.masks[n][l, h][:r] = True
 
+    # ---- new moves: single-matrix rank cuts, token groups, head merge ---------------------------------------
+    def _matrix(self, s, kind):
+        """(rows, cols, dense live count, factor rank or None) of W_E / W_pos / W_U."""
+        dense, a, b = FACTORS[kind]
+        Lc = s.struct["stream_alive"].nonzero().flatten()
+        if kind == "emb_rank":
+            rows, cols = (s.struct["tok_group"] == torch.arange(self.V)).nonzero().flatten(), Lc
+        elif kind == "pos_rank":
+            rows, cols = torch.arange(self.T), Lc
+        else:
+            rows, cols = Lc, torch.arange(self.V)
+        r = int((s.masks[a].any(0) & s.masks[b].any(1)).sum())
+        return rows, cols, int(s.masks[dense].sum()), (r if r > 0 else None)
+
+    def _target_rank(self, s, kind):
+        rows, cols, n_dense, r = self._matrix(s, kind)
+        if r is not None:
+            return r - 1 if r > 1 else None
+        r_new = (n_dense - 1) // (len(rows) + len(cols))           # largest r with r (rows + cols) < n_dense
+        return min(r_new, len(rows), len(cols)) if r_new >= 1 else None
+
+    @torch.no_grad()
+    def _matrix_rank_cut(self, s, c, kind):
+        r = self._target_rank(s, kind)
+        if r is None:
+            return False
+        rows, cols, _, _ = self._matrix(s, kind)
+        dense, a, b = FACTORS[kind]
+        E = self.effective(s)
+        W = (E[dense] + E[a] @ E[b])[rows[:, None], cols[None, :]].double()
+        if kind == "emb_rank":
+            g = s.struct["tok_group"]
+            fr = torch.stack([self.data["freq"][g == int(i)].sum() for i in rows])
+            Cl = torch.diag(fr / fr.sum())
+        elif kind == "pos_rank":
+            Cl = torch.eye(len(rows), dtype=torch.double)
+        else:
+            y = (c["x"][-1][..., rows] / c["s"][-1]).reshape(-1, len(rows)).double()
+            Cl = y.T @ y / len(y)
+        A, B = weighted_lowrank(W, Cl, torch.eye(len(cols), dtype=torch.double), r)
+        for n in (dense, a, b):
+            if bool(s.masks[n].any()):
+                zero_entries(s, n, s.masks[n].clone())
+        k = torch.arange(r)
+        s.params[a][rows[:, None], k[None, :]] = A; s.masks[a][rows[:, None], k[None, :]] = True
+        s.params[b][k[:, None], cols[None, :]] = B.T; s.masks[b][k[:, None], cols[None, :]] = True
+        return True
+
+    def _group_freq(self, s, c):
+        return float(self.data["freq"][s.struct["tok_group"] == c].sum())
+
+    @torch.no_grad()
+    def _token_merge(self, s, c, c2):
+        g = s.struct["tok_group"]
+        if int(g[c]) != c or int(g[c2]) != c2 or c == c2:
+            return False
+        f1, f2 = self._group_freq(s, c), self._group_freq(s, c2)
+        for n in ("W_E", "E_a"):
+            P, M = s.params[n], s.masks[n]
+            r1, r2 = P[c] * M[c].to(P.dtype), P[c2] * M[c2].to(P.dtype)
+            P[c2] = (f1 * r1 + f2 * r2) / max(f1 + f2, 1e-30)
+            M[c2] = M[c] | M[c2]
+            if bool(M[c].any()):
+                self._zero(s, n, (c,))
+        g[g == c] = c2
+        return True
+
+    @torch.no_grad()
+    def _head_merge(self, s, c, l, h, h2):
+        st = s.struct
+        if h == h2 or not (bool(st["head_alive"][l, h]) and bool(st["head_alive"][l, h2])):
+            return False
+        Lc = st["stream_alive"].nonzero().flatten()
+        nL = len(Lc)
+        r = min(self.dh, int(self.ov_dims(s, l, h).sum()) + int(self.ov_dims(s, l, h2).sum()))
+        inc = bool(s.masks["pV"][l, h].any() or s.masks["pV"][l, h2].any())
+        x, sc = c["x"][2 * l][..., Lc].double(), c["s"][2 * l].double()
+        av = torch.cat([x / sc] + ([1 / sc] if inc else []), -1)
+        y = torch.einsum("nts,nsk->ntk", c["A"][l][:, h2].double(), av).reshape(-1, av.shape[-1])
+        E = lambda n, hh: (s.params[n][l, hh] * s.masks[n][l, hh].to(s.params[n].dtype)).double()
+        N = 0
+        for hh in (h, h2):
+            WV = torch.cat([E("W_V", hh)[Lc]] + ([E("pV", hh)[None]] if inc else []))
+            N = N + WV @ E("W_O", hh)[:, Lc]
+        A, B = weighted_lowrank(N, y.T @ y / len(y), torch.eye(nL, dtype=torch.double), r)
+        self._write_factor(s, "W_V", ["pV"] if inc else [], l, h2, Lc, A, r)
+        self._zero(s, "W_O", (l, h2))
+        k = torch.arange(r)
+        s.params["W_O"][l, h2][k[:, None], Lc[None, :]] = B.T
+        s.masks["W_O"][l, h2][k[:, None], Lc[None, :]] = True
+        self._kill_head(s, l, h)
+        return True
+
     # ---- refresh, candidates, moves -----------------------------------------------------------------------
     @torch.no_grad()
     def refresh_extra(self, s, cfg):
@@ -492,7 +623,18 @@ class GPTAdapter(Adapter):
             for t_ in torch.argsort(vals, descending=True)[: cfg.n_merge].tolist():
                 a_, b_ = int(ids[iu[0, t_]]), int(ids[iu[1, t_]])
                 pairs += [(l, a_, b_), (l, b_, a_)]
-        return {"merge_pairs": pairs}
+        g = s.struct["tok_group"]
+        reps = (g == torch.arange(self.V)).nonzero().flatten()
+        E = self.effective(s)
+        Em = (E["W_E"] + E["E_a"] @ E["E_b"])[reps].double()
+        f = torch.tensor([self._group_freq(s, int(i)) for i in reps], dtype=torch.double)
+        cost = (f[:, None] * f[None, :] / (f[:, None] + f[None, :]).clamp_min(1e-30)) * torch.cdist(Em, Em).pow(2)
+        iu = torch.triu_indices(len(reps), len(reps), 1)
+        tok = []
+        for t_ in torch.argsort(cost[iu[0], iu[1]])[: self.n_tok].tolist():
+            a_, b_ = int(reps[iu[0, t_]]), int(reps[iu[1, t_]])
+            tok.append((a_, b_) if f[iu[0, t_]] <= f[iu[1, t_]] else (b_, a_))     # rarer group joins the other
+        return {"merge_pairs": pairs, "token_pairs": tok}
 
     def structural_moves(self, s, ctx, cfg):
         st, mv = s.struct, []
@@ -518,6 +660,17 @@ class GPTAdapter(Adapter):
             mv.append(Move("unit_merge", f"mlp{l}", l, {"l": l, "i": i, "i2": i2}))
         for slot in range(self.n_pool + self.n_each * self.n_sites):
             mv.append(Move("stream_mean", "stream", 0, {"slot": slot}))
+        for kind in FACTORS:
+            if self._target_rank(s, kind) is not None:
+                mv.append(Move(kind, kind.split("_")[0], 0, {}))
+        for (c1, c2) in ctx.get("token_pairs", []):
+            mv.append(Move("token_merge", "emb", 0, {"c": c1, "c2": c2}))
+        for l in range(self.L):
+            live = st["head_alive"][l].nonzero().flatten().tolist()
+            for h in live:
+                for h2 in live:
+                    if h != h2:
+                        mv.append(Move("head_merge", f"L{l}h{h}", l, {"l": l, "h": h, "h2": h2}))
         return mv
 
     @torch.no_grad()
@@ -525,6 +678,12 @@ class GPTAdapter(Adapter):
         p, st, c = m.payload, s.struct, self._cur
         if m.kind == "stream_mean":
             return self._stream_mean(s, self.stream_candidates(s, c)[p["slot"]])
+        if m.kind in FACTORS:
+            return self._matrix_rank_cut(s, c, m.kind)
+        if m.kind == "token_merge":
+            return self._token_merge(s, p["c"], p["c2"])
+        if m.kind == "head_merge":
+            return self._head_merge(s, c, p["l"], p["h"], p["h2"])
         l = p["l"]
         if m.kind.startswith("unit_"):
             i = p["i"]

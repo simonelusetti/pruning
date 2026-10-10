@@ -53,7 +53,8 @@ def replaced_forward(s, u, X, Xstats):
     def run(X, ms):
         T = X.shape[1]
         causal = AD.causal[:T, :T]
-        x = P["W_E"][X] + P["W_pos"][:T]
+        x = (P["W_E"] + P["E_a"] @ P["E_b"])[S["tok_group"][X]] + (P["W_pos"] + P["Pos_a"] @ P["Pos_b"])[:T]
+        WU = P["W_U"] + P["U_a"] @ P["U_b"]
         out = []
 
         def site(x, k):
@@ -74,7 +75,7 @@ def replaced_forward(s, u, X, Xstats):
             xr, s2 = site(x, 2 * l + 1)
             x = x + F.gelu((xr @ P["W_1"][l].T + P["p1"][l]) / s2 + P["b_1"][l]) @ P["W_2"][l].T + P["b_2"][l]
         xr, sf = site(x, 2 * AD.L)
-        return (xr @ P["W_U"] + P["pU"]) / sf + P["b_U"]
+        return (xr @ WU + P["pU"]) / sf + P["b_U"]
 
     ms = []
     run(Xstats, ms)
@@ -110,7 +111,7 @@ def test_every_move_kind_applies():
         assert all(bool(torch.isfinite(v).all()) for v in s2.params.values())
         assert math.isfinite(AD.metrics(s2, "valA")["loss"])
         seen.add(m.kind)
-    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS)
+    assert seen == set(GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS)
 
 
 def test_rank_cuts_after_stream_move():
@@ -140,6 +141,91 @@ def test_path_runs():
                       post_stop_steps=10)
     df, _ = prune_path(AD, S0, cfg)
     assert df["k_eff"].is_monotonic_decreasing and len(df) == 4
+
+
+
+
+
+# ---- new moves -------------------------------------------------------------------------------------------
+
+def _mv(kind, **p):
+    return Move(kind, "t", 0, p)
+
+
+def test_matrix_rank_cut_counts():
+    """first cut: dense -> largest rank r with r (rows + cols) < dense count; then one rank per cut."""
+    for kind, first, nxt in (("emb_rank", 65 * 63 - 31 * 128, 128), ("pos_rank", 32 * 63 - 21 * 95, 95),
+                             ("unemb_rank", 63 * 65 - 31 * 128, 128)):
+        s1 = AD.apply(S0, _mv(kind))
+        s2 = AD.apply(s1, _mv(kind))
+        assert AD.k_eff(S0) - AD.k_eff(s1) == first, kind
+        assert AD.k_eff(s1) - AD.k_eff(s2) == nxt, kind
+
+
+def test_matrix_rank_cut_exact_on_low_rank_matrix():
+    s = S0.clone()
+    Lc = s.struct["stream_alive"].nonzero().flatten()
+    W = s.params["W_pos"]
+    U, S_, Vh = torch.linalg.svd(W[:, Lc])
+    W[:, Lc] = (U[:, :5] * S_[:5]) @ Vh[:5]                      # rank 5 < 21
+    s2 = AD.apply(s, _mv("pos_rank"))
+    assert float((logits(s2) - logits(s)).abs().max()) < 1e-4
+
+
+def test_token_merge_exact_for_identical_rows_and_counts():
+    s = S0.clone()
+    s.params["W_E"][7] = s.params["W_E"][3]
+    s2 = AD.apply(s, _mv("token_merge", c=7, c2=3))
+    assert float((logits(s2) - logits(s)).abs().max()) < 1e-5
+    assert AD.k_eff(s) - AD.k_eff(s2) == 63
+    assert int(s2.struct["tok_group"][7]) == 3
+
+
+def test_token_merge_after_emb_rank_and_vice_versa():
+    a = AD.apply(AD.apply(S0, _mv("emb_rank")), _mv("token_merge", c=7, c2=3))
+    b = AD.apply(AD.apply(S0, _mv("token_merge", c=7, c2=3)), _mv("emb_rank"))
+    for s in (a, b):
+        assert s is not None and int(s.struct["tok_group"][7]) == 3
+        assert not bool(s.masks["E_a"][7].any()) and not bool(s.masks["W_E"].any())
+        assert math.isfinite(AD.metrics(s, "valA")["loss"])
+
+
+def test_head_merge_exact_for_duplicate_heads():
+    s = S0.clone()
+    for n in ("W_Q", "W_K", "W_V", "W_O", "b_Q", "pQ", "pK", "pV"):
+        s.params[n][1, 2] = s.params[n][1, 0]; s.masks[n][1, 2] = s.masks[n][1, 0]
+    s.params["W_O"][1, 0] *= 0.5; s.params["W_O"][1, 2] *= 0.5          # same function as one head
+    s2 = AD.apply(s, _mv("head_merge", l=1, h=2, h2=0))
+    assert float((logits(s2) - logits(s)).abs().max()) < 1e-4
+    assert not bool(s2.struct["head_alive"][1, 2]) and AD.ov_dims(s2, 1, 0).sum() == 16
+
+
+def test_stream_move_exact_after_new_moves():
+    """the stream move through the LayerNorm route with factored W_E, W_pos, W_U and token groups."""
+    s = S0
+    for m in (_mv("emb_rank"), _mv("pos_rank"), _mv("unemb_rank"), _mv("token_merge", c=7, c2=3),
+              _mv("head_merge", l=0, h=1, h2=0)):
+        s = AD.apply(s, m)
+    for _ in range(2):
+        c = AD._stats(s)
+        u = AD.stream_candidates(s, c)[0]
+        s2 = AD.apply(s, Move("stream_mean", "stream", 0, {"slot": 0}))
+        ref = replaced_forward(s, u, X, AD.data["stats"][0])
+        assert float((logits(s2) - ref).abs().max()) < 1e-4 * float(ref.abs().max())
+        dead = ~s2.struct["stream_alive"]
+        for n, ax in GA.STREAM_AX.items():
+            assert not bool((GA._along(s2.masks[n], ax) & dead).any()), n
+        s = s2
+
+
+def test_new_moves_after_stream_moves():
+    s = AD.apply(AD.apply(S0, Move("stream_mean", "stream", 0, {"slot": 0})), Move("stream_mean", "stream", 0, {"slot": 0}))
+    for m in (_mv("emb_rank"), _mv("pos_rank"), _mv("unemb_rank"), _mv("token_merge", c=7, c2=3),
+              _mv("head_merge", l=1, h=1, h2=3)):
+        s2 = AD.apply(s, m)
+        assert s2 is not None and AD.k_eff(s2) < AD.k_eff(s), m.kind
+        assert math.isfinite(AD.metrics(s2, "valA")["loss"]), m.kind
+        s = s2
 
 
 if __name__ == "__main__":

@@ -8,6 +8,9 @@ tie-break fewest parameters then loss, admissibility off):
   stream only | valA
   W+S | valA | magnitude         + single-weight chunks of 64, magnitude proposer
   W+S+stream | valA | magnitude
+  S+stream+new | valA            + the new moves (gpt_adapter.NEW_KINDS)
+  W+S+stream+new | valA | magnitude
+  new only | valA
 Stage 1 (exact folds) is applied first; frac_removed_orig counts from the trained model.
 Margins: the anchored valB test  mean dL <= 2 SE + rho * base val loss  is recorded with
 rho = 5% (tol_abs), and each run ends 50 steps after its first failure there (or at 97%
@@ -41,6 +44,11 @@ ARMS = {
     "stream only | valA": dict(weight_per_site=0, struct_kinds=GA.STREAM_KINDS),
     "W+S | valA | magnitude": dict(weight_per_site=3, struct_kinds=GA.HER_KINDS),
     "W+S+stream | valA | magnitude": dict(weight_per_site=3, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS),
+    # the new moves (emb/pos/unemb rank cuts, token merge, head merge) with everything else
+    "S+stream+new | valA": dict(weight_per_site=0, struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS),
+    "W+S+stream+new | valA | magnitude": dict(weight_per_site=3,
+                                              struct_kinds=GA.HER_KINDS + GA.STREAM_KINDS + GA.NEW_KINDS),
+    "new only | valA": dict(weight_per_site=0, struct_kinds=GA.NEW_KINDS),
 }
 
 
