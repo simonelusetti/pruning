@@ -1,0 +1,21 @@
+L=2 seed 2: p = 110529, after Stage 1 k = 107931 (2598 removed exactly, max |logit change| 4.4e-05); val loss 1.5903
+[L2 s2 allstream only | valA] step    10  k_eff 104778 (  2.9% removed)  val 1.5907  test 1.8574  last=stream_write[write5] {'writer': 5, 'slot': 0}  ties 18/24  289s
+[L2 s2 allstream only | valA] step    20  k_eff 101558 (  5.9% removed)  val 1.5897  test 1.8466  last=stream_site[site4] {'site': 4, 'slot': 1}  ties 1/24  568s
+[L2 s2 allstream only | valA] step    30  k_eff  99637 (  7.7% removed)  val 1.5931  test 1.8478  last=stream_site[site4] {'site': 4, 'j': 53}  ties 11/24  935s
+[L2 s2 allstream only | valA] step    40  k_eff  98549 (  8.7% removed)  val 1.5955  test 1.8414  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'slot': 0}  ties 11/21  1169s
+[L2 s2 allstream only | valA] step    50  k_eff  97905 (  9.3% removed)  val 1.5966  test 1.8359  last=stream_read[site0.W_Q] {'site': 0, 'reader': 'W_Q', 'j': 49}  ties 9/13  1599s
+[L2 s2 allstream only | valA] step    60  k_eff  97425 (  9.7% removed)  val 1.5997  test 1.8355  last=stream_write[write1] {'writer': 1, 'slot': 1}  ties 6/11  1791s
+[L2 s2 allstream only | valA] step    70  k_eff  96944 ( 10.2% removed)  val 1.6031  test 1.8362  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'slot': 0}  ties 10/16  2296s
+[L2 s2 allstream only | valA] step    80  k_eff  96592 ( 10.5% removed)  val 1.6051  test 1.8387  last=stream_write[write1] {'writer': 1, 'j': 27}  ties 5/9  2497s
+[L2 s2 allstream only | valA] step    90  k_eff  96078 ( 11.0% removed)  val 1.6103  test 1.8437  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'j': 45}  ties 8/11  3027s
+[L2 s2 allstream only | valA] step   100  k_eff  95629 ( 11.4% removed)  val 1.6217  test 1.8496  last=stream_write[write1] {'writer': 1, 'j': 49}  ties 1/3  3184s
+[L2 s2 allstream only | valA] step   110  k_eff  95020 ( 12.0% removed)  val 1.6317  test 1.8572  last=stream_write[write0] {'writer': 0, 'j': 34}  ties 2/9  3643s
+[L2 s2 allstream only | valA] step   120  k_eff  94474 ( 12.5% removed)  val 1.6456  test 1.8683  last=stream_read[site0.W_Q] {'site': 0, 'reader': 'W_Q', 'j': 39}  ties 8/15  4112s
+[L2 s2 allstream only | valA] step   130  k_eff  93834 ( 13.1% removed)  val 1.6616  test 1.8800  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'j': 5}  ties 4/5  4256s
+[L2 s2 allstream only | valA] step   140  k_eff  93194 ( 13.7% removed)  val 1.6799  test 1.8921  last=stream_read[site0.W_K] {'site': 0, 'reader': 'W_K', 'j': 19}  ties 8/11  4717s
+[L2 s2 allstream only | valA] step   150  k_eff  92617 ( 14.2% removed)  val 1.7098  test 1.9120  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'j': 44}  ties 2/3  4852s
+[L2 s2 allstream only | valA] step   160  k_eff  92009 ( 14.8% removed)  val 1.7458  test 1.9342  last=stream_read[site2.W_Q] {'site': 2, 'reader': 'W_Q', 'j': 26}  ties 4/7  5301s
+[L2 s2 allstream only | valA] step   170  k_eff  91370 ( 15.3% removed)  val 1.7783  test 1.9612  last=stream_read[site2.W_K] {'site': 2, 'reader': 'W_K', 'j': 12}  ties 5/8  5734s
+[L2 s2 allstream only | valA] step   180  k_eff  90761 ( 15.9% removed)  val 1.8092  test 1.9907  last=stream_write[write0] {'writer': 0, 'j': 31}  ties 1/8  6171s
+DONE L=2 seed 2 allstream only | valA: 186 steps, 18.2% removed, 6262s
+ALL DONE L=2 seed 2

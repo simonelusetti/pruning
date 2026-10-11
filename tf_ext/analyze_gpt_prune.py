@@ -45,7 +45,8 @@ if __name__ == "__main__":
     for (m, s), d in paths.groupby(["method", "seed"]):
         if "stream" in m:
             st = stops(d)[0.05][2]
-            print(f"  {m:32s} seed {s}: {(d.kind == 'stream_mean').sum():3d} / {((d.kind == 'stream_mean') & (d.step <= st)).sum():3d}")
+            ks = d.kind.astype(str).str.startswith("stream")
+            print(f"  {m:40s} seed {s}: {ks.sum():3d} / {(ks & (d.step <= st)).sum():3d}")
 
     print("\nparameters removed by move kind up to the rho = 5% stop (% of p, mean over seeds; Stage 1 = 2.4):")
     comp = []
