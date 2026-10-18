@@ -3,9 +3,8 @@ Gap-based identifiability diagnostics for network blocks.
 
 `classify_spectrum` is a verbatim port of criteria_bench.spectrum.classify_spectrum
 (tolerance-free plateau test, outermost admissible gap; see that module for the
-argument).  It is vendored so this package does not import sympy;
-tests/test_core.py checks it against the original when criteria_bench is
-importable.
+argument).  It is vendored so this package does not import sympy and was checked
+against the original when criteria_bench was importable.
 
 What is measured
 ----------------
@@ -177,8 +176,8 @@ def block_fisher(adapter, state, block: dict, X: torch.Tensor, R: int = 2, seed:
     def out_single(theta, x):
         return adapter.logits(build(theta), struct, x.unsqueeze(0)).squeeze(0)
 
-    F = torch.zeros(P, P, dtype=torch.float64)
-    gen = torch.Generator().manual_seed(seed)
+    F = torch.zeros(P, P, dtype=torch.float64, device=theta0.device)
+    gen = torch.Generator(device=X.device).manual_seed(seed)
     for start in range(0, X.shape[0], batch):
         xb = X[start:start + batch]
         if xb.is_floating_point():
@@ -198,7 +197,7 @@ def block_fisher(adapter, state, block: dict, X: torch.Tensor, R: int = 2, seed:
                          in_dims=(None, 0, 0))(theta0, xb, yh)
                 F += G.T @ G / R
     F = (F + F.T) / 2
-    return F.numpy()
+    return F.cpu().numpy()
 
 
 def classify_block(adapter, state, block, X, expected_null=None, R=2, min_decades=3.0,

@@ -1,8 +1,8 @@
 """
 Worked example of Veronica's boundary pruning on the moons MLP (seed 123).
 
-Uses her package (../NNpruning/nnprune) and her trained network
-(../NNpruning/results/mlp/base_state_seed123.pt); nothing is retrained.
+Uses the package (../NNpruning/nnprune) and the cached two-moons checkpoint
+(../checkpoints/moons_seed123.pt); nothing is retrained.
 
 Sections
   1. the network and its data splits
@@ -30,10 +30,12 @@ from nnprune import mlp as M                                     # noqa: E402
 from nnprune.core import (PruneConfig, paired_stats, zero_entries,  # noqa: E402
                           refresh, candidates, evaluate_candidates,
                           select_move, prune_path, REMOVED, STEP)
-from nnprune.experiments import MLP_BASE, FAIR_COMMON, split_validation  # noqa: E402
+from nnprune.experiments import MLP_BASE, split_validation  # noqa: E402
 
 torch.set_num_threads(4)
 SEED = 123
+WALK_COMMON = dict(tie_break="k_eff", criterion="loss", stop_split="valB",
+                   select_admissibility=False)
 out_lines = []
 
 
@@ -53,7 +55,8 @@ def delta(ad, s_new, s_ref, split="val"):
 # ----------------------------------------------------------------------------
 data, _ = M.make_moons_data(seed=SEED)
 ad = M.MLPAdapter(split_validation(data, SEED))
-s0 = torch.load(os.path.join(NNP, "results", "mlp", f"base_state_seed{SEED}.pt"), weights_only=False)
+s0 = torch.load(os.path.join(HERE, "..", "checkpoints", f"moons_seed{SEED}.pt"),
+                weights_only=False)
 
 say("=" * 78)
 say("1. THE NETWORK")
@@ -151,7 +154,7 @@ say("4. ONE STEP OF THE GREEDY LOOP (round-4 setting: choose on valA, stop on va
 say("=" * 78)
 base_val = ad.metrics(s0, "val")["loss"]
 delta_margin = 0.01 * base_val
-cfg = PruneConfig(**{**MLP_BASE, **FAIR_COMMON, "select_split": "valA", "weight_score": "obd",
+cfg = PruneConfig(**{**MLP_BASE, **WALK_COMMON, "select_split": "valA", "weight_score": "obd",
                      "seed": SEED, "verbose": False})
 ctx = refresh(ad, s0, cfg)
 moves = candidates(ad, s0, ctx, cfg)
@@ -195,13 +198,13 @@ say("")
 say("=" * 78)
 say("5. THE WHOLE PATH (stop margin = 1% of the base validation loss)")
 say("=" * 78)
-cfg_full = PruneConfig(**{**MLP_BASE, **FAIR_COMMON, "select_split": "valA", "weight_score": "obd",
+cfg_full = PruneConfig(**{**MLP_BASE, **WALK_COMMON, "select_split": "valA", "weight_score": "obd",
                           "seed": SEED, "verbose": False, "stop_mode": "mark", "max_frac": 0.97})
 df, _ = prune_path(ad, s0, cfg_full, label="W+S | valA | obd")
 ok = (df["stop_mean"] <= 2 * df["stop_se"] + delta_margin).values
 ff = int(np.argmax(~ok)) if (~ok).any() else len(df)
 stop_step = int(df.iloc[ff - 1]["step"])
-cfg_stop = PruneConfig(**{**MLP_BASE, **FAIR_COMMON, "select_split": "valA", "weight_score": "obd",
+cfg_stop = PruneConfig(**{**MLP_BASE, **WALK_COMMON, "select_split": "valA", "weight_score": "obd",
                           "seed": SEED, "verbose": False, "stop_mode": "halt",
                           "max_steps": stop_step, "max_frac": 1.0})
 df_s, s_end = prune_path(ad, s0, cfg_stop, label="replay")
@@ -209,7 +212,6 @@ censored = ff == len(df)
 say(f"path continued to {100 * df['frac_removed'].iloc[-1]:.1f}% removed; "
     + (f"the valB stop rule never failed, so the path ends at the 97% cap (step {stop_step})"
        if censored else f"the valB stop rule halts it after step {stop_step}"))
-say(f"(cached result for this method and seed: results/fair_mlp/summary.csv)")
 say(f"\n{'step':>4s} {'move':12s} {'removes':>7s} {'% removed':>9s} {'test loss':>9s} {'test acc':>8s}")
 for _, r in df_s.iterrows():
     if r["step"] in (0, 1, 2, 3, 5, 10, 20, 30, 50, 75) or r["step"] == stop_step:

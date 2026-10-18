@@ -1,7 +1,7 @@
 """
 Can one shared subspace describe the stream x at every depth of her transformer?
 
-Model: Veronica's cached base model (NNpruning/results/transformer/base_state_seed0.pt,
+Model: the cached modular-addition checkpoint (checkpoints/modadd_seed0.pt,
 1 layer, d = 64, a + b mod 59, the network of her paper), on the same data split.
 
 Stream vectors and where they are used (positions t = 0, 1, 2; only t = 2 reaches the loss):
@@ -52,7 +52,7 @@ D, PER_DIR, NEW_BIAS = 64, 891, 448
 def setup():
     data = T.make_modadd_data(p=59, train_frac=0.5, seed=0)
     ad = T.TransformerAdapter(data, p=59)
-    s0 = torch.load(os.path.join(ROOT, "NNpruning", "results", "transformer", "base_state_seed0.pt"),
+    s0 = torch.load(os.path.join(ROOT, "checkpoints", "modadd_seed0.pt"),
                     weights_only=False)
     return ad, s0, data
 

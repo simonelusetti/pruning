@@ -14,7 +14,7 @@ context T = 32):
 Nothing is removed or folded here: gamma, beta and every bias are trained as in GPT.
 The embedding is untied (as in LLaMA-style models; GPT-2 ties W_U = W_E^T): with a tie
 the exact LayerNorm folds and the stream move would change the two uses of W_E
-differently.  The tied models are kept in results_gpt_tied/.
+differently.
 Folds and moves happen only inside the pruning runs, on a copy.
 
 Data: Karpathy's tinyshakespeare (data/shakespeare/input.txt, 1 115 394 characters,
@@ -29,7 +29,6 @@ gradient clipping at 1.0, batch 64 random windows, dropout 0.  Init as nanoGPT:
 N(0, 0.02), W_O and W_2 at 0.02 / sqrt(2 L), biases 0, gamma 1, beta 0.
 
 Usage:  SEED=0 STEPS=10000 L=2 python3 gpt_toy.py
-        writes results_gpt/L<L>_seed<k>/{base_state.pt, step<n>.pt, hist.csv}
 """
 from __future__ import annotations
 
@@ -37,7 +36,6 @@ import math
 import os
 import time
 
-import pandas as pd
 import torch
 import torch.nn.functional as F
 
@@ -81,8 +79,10 @@ def windows(ids, T, n=None, seed=0):
 
 
 def random_batch(ids, T, B, g):
-    i = torch.randint(0, len(ids) - T - 1, (B,), generator=g)
-    return torch.stack([ids[j:j + T] for j in i]), torch.stack([ids[j + 1:j + T + 1] for j in i])
+    i = torch.randint(0, len(ids) - T - 1, (B,), generator=g, device=ids.device)
+    offsets = torch.arange(T, device=ids.device)
+    positions = i[:, None] + offsets
+    return ids[positions], ids[positions + 1]
 
 
 # ---- model -------------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def forward(P: dict, cfg: GPTConfig, X: torch.Tensor, cache: bool = False):
     """X: (n, T) token ids -> logits (n, T, V) [, cache].  cache['x_in'] lists the stream
     at the input of every LayerNorm (ln1, ln2 of each block, then ln_f)."""
     T = X.shape[1]
-    causal = torch.tril(torch.ones(T, T, dtype=torch.bool))
+    causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=X.device))
     x = P["W_E"][X] + P["W_pos"][:T]
     c = {"x_in": [], "attn": [], "ho": [], "act": []} if cache else None
     for l in range(cfg.L):
@@ -163,19 +163,21 @@ def lr_at(it, steps, lr, warmup=100, min_lr=1e-4):
     return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * (it - warmup) / max(1, steps - warmup)))
 
 
-def train(seed=0, L=2, steps=10000, lr=1e-3, wd=0.1, batch=64, log_every=250, save_every=2500, out=None):
+def train(seed=0, L=2, steps=10000, lr=1e-3, wd=0.1, batch=64, log_every=250,
+          out=None, device="cpu"):
     cfg = GPTConfig(L=L)
     data, chars = load_text()
+    device = torch.device(device)
+    data = {k: v.to(device) for k, v in data.items()}
     assert len(chars) == cfg.V
     Xva, Yva = windows(data["val"], cfg.T, n=1024, seed=0)       # fixed monitoring set
     torch.manual_seed(seed)
-    P = {k: v.requires_grad_(True) for k, v in init_params(cfg, seed).items()}
+    P = {k: v.to(device).requires_grad_(True) for k, v in init_params(cfg, seed).items()}
     decay = [v for v in P.values() if v.dim() >= 2]
     no_decay = [v for v in P.values() if v.dim() < 2]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": wd},
                              {"params": no_decay, "weight_decay": 0.0}], lr=lr, betas=(0.9, 0.99))
-    g = torch.Generator().manual_seed(seed)
-    os.makedirs(out, exist_ok=True)
+    g = torch.Generator(device=device).manual_seed(seed)
     print(f"L={L} seed {seed}: {n_params(P)} parameters; {len(data['train'])} train characters", flush=True)
     hist, t0, run = [], time.time(), 0.0
     for it in range(steps + 1):
@@ -184,8 +186,6 @@ def train(seed=0, L=2, steps=10000, lr=1e-3, wd=0.1, batch=64, log_every=250, sa
             hist.append(dict(step=it, train_loss=run, val_loss=va[0], val_acc=va[1]))
             print(f"L={L} seed {seed} step {it:6d}  train(avg) {run:.4f}  val {va[0]:.4f} acc {va[1]:.3f}  "
                   f"({time.time() - t0:.0f}s)", flush=True)
-        if it % save_every == 0 and 0 < it < steps:
-            torch.save({k: v.detach().clone() for k, v in P.items()}, os.path.join(out, f"step{it}.pt"))
         if it == steps:
             break
         for gr in opt.param_groups:
@@ -198,8 +198,9 @@ def train(seed=0, L=2, steps=10000, lr=1e-3, wd=0.1, batch=64, log_every=250, sa
         run = 0.98 * run + 0.02 * loss.item() if it else loss.item()
     base = {"params": {k: v.detach().clone() for k, v in P.items()}, "cfg": cfg.as_dict(), "chars": chars,
             "seed": seed, "steps": steps, "lr": lr, "wd": wd, "batch": batch}
-    torch.save(base, os.path.join(out, "base_state.pt"))
-    pd.DataFrame(hist).to_csv(os.path.join(out, "hist.csv"), index=False)
+    if out is not None:
+        os.makedirs(out, exist_ok=True)
+        torch.save(base, os.path.join(out, "base_state.pt"))
     res = {sp: evaluate(base["params"], cfg, *windows(data[sp], cfg.T)) for sp in ("train", "val", "test")}
     print(f"DONE L={L} seed {seed}: " + "  ".join(f"{sp} loss {v[0]:.4f} acc {v[1]:.3f}" for sp, v in res.items())
           + f"  ({time.time() - t0:.0f}s)", flush=True)
@@ -209,4 +210,4 @@ if __name__ == "__main__":
     torch.set_num_threads(int(os.environ.get("THREADS", "4")))
     seed, L = int(os.environ.get("SEED", "0")), int(os.environ.get("L", "2"))
     train(seed=seed, L=L, steps=int(os.environ.get("STEPS", "10000")),
-          out=os.path.join(os.environ.get("GPT_RESULTS", os.path.join(HERE, "results_gpt")), f"L{L}_seed{seed}"))
+          device="cuda" if torch.cuda.is_available() else "cpu")

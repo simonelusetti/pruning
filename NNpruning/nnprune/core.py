@@ -15,11 +15,12 @@ every limit is realised by its exact representative (a constant folded into the
 downstream bias, a Heaviside unit, a fixed pattern).
 
 *Geometry proposes, data decides.*  Candidate moves are ranked by a local
-geometric prediction (diagonal GGN/Fisher second-order cost for weights; an exact
-loss change on a training subset for the few hundred structural moves), and the
+geometric prediction (diagonal GGN/Fisher for weights, downstream Fisher
+reconstruction for compensated deletions, and training loss for other structural
+moves), and the
 decision is taken on the VALIDATION set with a paired test:
 
-  admissible   mean(l(f_m) - l(f_0))   <= n_sigma * SE   (+ tol_abs)     anchored at f_0
+  admissible   mean(l(f_m) - l(f_0)) <= n_sigma * SE + tol_abs + tol_frac mean(l(f_0))
   tie set      mean(l(f_m) - l(f_m*))  <= n_sigma * SE                   m* = best admissible
   tie-break    lexicographic on (k_eff removed, layer index, loss) -- flag `tie_break`
 
@@ -45,6 +46,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.func import grad, vmap
+from torch.utils.data import DataLoader, TensorDataset
 
 ACTIVE, REMOVED, STEP = 0, 1, 2
 
@@ -67,6 +69,14 @@ class State:
              for k, v in self.struct.items()},
         )
 
+    def to(self, device) -> "State":
+        return State(
+            {k: v.to(device) for k, v in self.params.items()},
+            {k: v.to(device) for k, v in self.masks.items()},
+            {k: (v.to(device) if torch.is_tensor(v) else copy.deepcopy(v))
+             for k, v in self.struct.items()},
+        )
+
 
 @dataclass
 class Move:
@@ -77,6 +87,9 @@ class Move:
     pred_cost: float = float("nan")
 
     def describe(self) -> str:
+        if self.kind == "fisher_general":
+            return (f"fisher_general[{self.site}] D={self.payload['n_deleted']} "
+                    f"U={self.payload['n_updates']} K={self.payload['closure_savings']}")
         if self.kind == "zero":
             return f"zero[{self.site}] x{int(self.payload['idx'].numel())}"
         keys = {k: v for k, v in self.payload.items() if not torch.is_tensor(v)}
@@ -106,9 +119,34 @@ class Adapter:
     loss_type = "categorical"          # or 'bernoulli'
     prunable: list = []                # weight tensors eligible for 'zero' moves
     site_layer: dict = {}              # prunable name -> depth index
+    move_groups: dict[str, tuple[str, ...]] = {"classic": ()}
 
     def __init__(self, data: dict):
         self.data = data               # split -> (X, y)
+
+    def to(self, device) -> "Adapter":
+        self.data = {
+            split: (value.to(device) if torch.is_tensor(value) else
+                    tuple(x.to(device) if torch.is_tensor(x) else x for x in value))
+            for split, value in self.data.items()
+        }
+        for name, value in vars(self).items():
+            if torch.is_tensor(value):
+                setattr(self, name, value.to(device))
+        return self
+
+    def resolve_struct_kinds(self, kinds) -> tuple[str, ...]:
+        requested = ("classic",) if kinds is None else tuple(kinds)
+        individual = {kind for members in self.move_groups.values() for kind in members}
+        unknown = [name for name in requested
+                   if name not in self.move_groups and name not in individual]
+        if unknown:
+            raise ValueError(f"unknown structural move or group: {', '.join(unknown)}")
+        resolved = []
+        for name in requested:
+            members = self.move_groups.get(name, (name,))
+            resolved.extend(members)
+        return tuple(dict.fromkeys(resolved))
 
     # ---- model ----------------------------------------------------------
     def logits(self, params: dict, struct: dict, X: torch.Tensor) -> torch.Tensor:
@@ -166,6 +204,9 @@ class Adapter:
     def structural_moves(self, state: State, ctx: dict, cfg) -> list:
         return []
 
+    def prepare_structural_candidates(self, state: State, moves: list, cfg) -> list:
+        return moves
+
     def apply_structural(self, state: State, move: Move) -> bool:
         raise NotImplementedError(move.kind)
 
@@ -205,6 +246,7 @@ class PruneConfig:
     # decision rule
     n_sigma: float = 2.0                 # the "2 sigma" of the paired tests
     tol_abs: float = 0.0                 # optional absolute slack on the anchored test (nats)
+    tol_frac: float = 0.0                # optional fraction of the anchor's mean criterion
     tie_break: str = "k_eff_then_layer"  # one of TIE_BREAKS
     criterion: str = "loss"              # per-sample quantity of the paired tests: 'loss' | 'error'
     select_split: str = "val"            # split used to CHOOSE moves (admissibility, tie set): 'val' | 'valA' | 'train'
@@ -221,13 +263,26 @@ class PruneConfig:
     weight_chunk: int = 1                # weights zeroed per 'zero' move
     weight_per_site: int = 8             # cheapest chunks proposed per prunable tensor
     use_struct: bool = True              # structural (boundary) moves on/off
-    struct_kinds: Optional[tuple] = None  # restrict structural kinds (None = all)
+    struct_kinds: Optional[tuple] = None  # move names/groups; None selects "classic"
     n_struct: int = 32                   # structural moves proposed per step (cheapest by screen)
     n_merge: int = 16                    # merge pairs screened per layer
+    step_per_unit: Optional[int] = None  # strongest first-layer features; None = all
+    n_ablate: int = 0                    # loss-aware unit deletions shortlisted per refresh (0 = disabled)
+    ablate_score: str = "gate_fisher"    # 'gate_fisher' | 'write_energy'
     refresh_every: int = 10              # steps between geometry refreshes
     screen_n: Optional[int] = None       # train points used by the structural screen (None = all)
     n_mc: int = 1                        # MC label samples for categorical Fisher
     fisher_batch: int = 256
+    fisher_quant_gamma: float = 0.2
+    fisher_general_lambda_u: float = 1e-8
+    fisher_general_lambda_d: float = 1e-7
+    fisher_general_mu: float = 1e-4
+    fisher_general_window: int = 16
+    fisher_general_min_savings: int = 1
+    fisher_general_pool: int = 8
+    fisher_general_starts: int = 2
+    fisher_general_iters: int = 4
+    fisher_general_update_pool: int = 4
     # path
     max_steps: int = 100000
     expand_on_fail: int = 4              # retry with this many times more candidates before stopping
@@ -242,6 +297,36 @@ class PruneConfig:
             raise ValueError("criterion must be 'loss' or 'error'")
         if self.weight_score not in ("obd", "magnitude", "fdist"):
             raise ValueError("weight_score must be 'obd', 'magnitude' or 'fdist'")
+        if self.ablate_score not in ("gate_fisher", "write_energy"):
+            raise ValueError("ablate_score must be 'gate_fisher' or 'write_energy'")
+        if self.n_ablate < 0:
+            raise ValueError("n_ablate must be non-negative")
+        if self.n_mc < 1:
+            raise ValueError("n_mc must be positive")
+        if self.fisher_quant_gamma <= 0:
+            raise ValueError("fisher_quant_gamma must be positive")
+        if min(self.fisher_general_lambda_u, self.fisher_general_lambda_d,
+               self.fisher_general_mu) < 0:
+            raise ValueError("fisher_general penalties must be non-negative")
+        if min(self.fisher_general_window, self.fisher_general_min_savings,
+               self.fisher_general_pool, self.fisher_general_starts,
+               self.fisher_general_iters, self.fisher_general_update_pool) < 1:
+            raise ValueError("fisher_general search limits must be positive")
+        if self.step_per_unit is not None and self.step_per_unit < 1:
+            raise ValueError("step_per_unit must be positive")
+        if self.stop_mode not in ("halt", "mark"):
+            raise ValueError("stop_mode must be 'halt' or 'mark'")
+        if self.n_sigma < 0 or self.tol_abs < 0 or self.tol_frac < 0:
+            raise ValueError("n_sigma, tol_abs and tol_frac must be non-negative")
+        if not 0 < self.max_frac <= 1:
+            raise ValueError("max_frac must be in (0, 1]")
+        if self.max_steps < 1 or self.refresh_every < 1:
+            raise ValueError("max_steps and refresh_every must be positive")
+        if min(self.weight_chunk, self.weight_per_site, self.n_struct,
+               self.n_merge, self.post_stop_steps) < 0:
+            raise ValueError("candidate budgets must be non-negative")
+        if self.weight_per_site and self.weight_chunk < 1:
+            raise ValueError("weight_chunk must be positive when weight moves are enabled")
 
     @property
     def stop(self) -> str:
@@ -275,10 +360,11 @@ def diag_fisher_and_grad(adapter: Adapter, state: State, cfg: PruneConfig,
         return adapter.logits(P, struct, x.unsqueeze(0)).squeeze(0)
 
     fisher = {k: torch.zeros_like(W[k]) for k in names}
-    gen = torch.Generator().manual_seed(cfg.seed)
-    n = X.shape[0]
-    for start in range(0, n, cfg.fisher_batch):
-        xb = X[start:start + cfg.fisher_batch]
+    grads = {k: torch.zeros_like(W[k]) for k in names}
+    gen = torch.Generator(device=X.device).manual_seed(cfg.seed)
+    batches = DataLoader(TensorDataset(X, y), batch_size=cfg.fisher_batch,
+                         shuffle=False)
+    for xb, yb in batches:
         with torch.no_grad():
             P = dict(fixed)
             for k in names:
@@ -293,21 +379,25 @@ def diag_fisher_and_grad(adapter: Adapter, state: State, cfg: PruneConfig,
         else:
             probs = torch.softmax(zb, -1)
             for _ in range(cfg.n_mc):
-                yh = torch.multinomial(probs, 1, generator=gen).squeeze(-1)
+                # torch.multinomial accepts only one- or two-dimensional input;
+                # flatten any structured sample axes (for example GPT sequence
+                # positions) while preserving the final class axis.
+                yh = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1, generator=gen)
+                yh = yh.squeeze(-1).reshape(probs.shape[:-1])
                 g = vmap(grad(lambda w, x, t: torch.log_softmax(out_single(w, x), -1)
-                              .gather(0, t.unsqueeze(0)).squeeze(0)),
+                              .gather(-1, t.unsqueeze(-1)).squeeze(-1).mean()),
                          in_dims=(None, 0, 0))(W, xb, yh)
                 for k in names:
                     fisher[k] += (g[k] ** 2).sum(0) / cfg.n_mc
 
-    # gradient of the summed TRAINING loss (true labels)
-    Wg = {k: W[k].clone().requires_grad_(True) for k in names}
-    P = dict(fixed)
-    for k in names:
-        P[k] = Wg[k] * M[k]
-    loss = adapter.loss_from_logits(adapter.logits(P, struct, X), y).sum()
-    gr = torch.autograd.grad(loss, [Wg[k] for k in names])
-    grads = {k: g.detach() for k, g in zip(names, gr)}
+        Wg = {k: W[k].clone().requires_grad_(True) for k in names}
+        P = dict(fixed)
+        for k in names:
+            P[k] = Wg[k] * M[k]
+        loss = adapter.loss_from_logits(adapter.logits(P, struct, xb), yb).sum()
+        batch_grads = torch.autograd.grad(loss, [Wg[k] for k in names])
+        for k, value in zip(names, batch_grads):
+            grads[k] += value.detach()
     return fisher, grads
 
 
@@ -368,13 +458,12 @@ def select_move(results: list, cfg: PruneConfig):
 
 def refresh(adapter: Adapter, state: State, cfg: PruneConfig) -> dict:
     ctx = {}
-    if cfg.weight_score == "obd":
-        ctx["fisher"], ctx["grad"] = diag_fisher_and_grad(adapter, state, cfg)
-    elif cfg.weight_score == "fdist":
-        # Berman et al.'s own model Fisher (vendored code, their 500-point subset),
-        # recomputed at every refresh: their iterative score sqrt(F_kk(theta)) |theta_k|
-        from .fdist_baseline import _sqrtF_at, fisher_loader
-        ctx["sqrtF"] = _sqrtF_at(adapter, state, fisher_loader(adapter))
+    if cfg.weight_per_site > 0:
+        if cfg.weight_score == "obd":
+            ctx["fisher"], ctx["grad"] = diag_fisher_and_grad(adapter, state, cfg)
+        elif cfg.weight_score == "fdist":
+            from .fdist_baseline import _sqrtF_at, fisher_loader
+            ctx["sqrtF"] = _sqrtF_at(adapter, state, fisher_loader(adapter))
     ctx.update(adapter.refresh_extra(state, cfg))
     ctx["struct_ranked"] = screen_structural(adapter, state, ctx, cfg) if cfg.use_struct else []
     return ctx
@@ -384,20 +473,24 @@ def _screen_idx(adapter: Adapter, cfg: PruneConfig):
     n = adapter.data["train"][0].shape[0]
     if cfg.screen_n is None or cfg.screen_n >= n:
         return None
-    g = torch.Generator().manual_seed(cfg.seed + 7)
-    return torch.randperm(n, generator=g)[: cfg.screen_n]
+    device = adapter.data["train"][0].device
+    g = torch.Generator(device=device).manual_seed(cfg.seed + 7)
+    return torch.randperm(n, generator=g, device=device)[: cfg.screen_n]
 
 
 def screen_structural(adapter: Adapter, state: State, ctx: dict, cfg: PruneConfig) -> list:
-    """Exact change of the mean TRAINING loss for every structural move (they are
-    few).  Used only to choose which structural moves reach the validation test."""
+    """Rank structural moves before the validation shortlist."""
     moves = adapter.structural_moves(state, ctx, cfg)
-    if cfg.struct_kinds is not None:
-        moves = [m for m in moves if m.kind in cfg.struct_kinds]
+    allowed = adapter.resolve_struct_kinds(cfg.struct_kinds)
+    moves = [m for m in moves if m.kind in allowed]
     idx = _screen_idx(adapter, cfg)
     base = adapter.per_sample_loss(state, "train", idx).mean().item()
     ranked = []
     for m in moves:
+        if m.payload.get("screen_cost") == "fisher":
+            if math.isfinite(m.pred_cost):
+                ranked.append(m)
+            continue
         s2 = adapter.apply(state, m)
         if s2 is None:
             continue
@@ -443,7 +536,8 @@ def candidates(adapter: Adapter, state: State, ctx: dict, cfg: PruneConfig,
                expand: int = 1) -> list:
     moves = weight_candidates(adapter, state, ctx, cfg, expand)
     if cfg.use_struct:
-        moves += ctx["struct_ranked"][: cfg.n_struct * expand]
+        shortlist = ctx["struct_ranked"][: cfg.n_struct * expand]
+        moves += adapter.prepare_structural_candidates(state, shortlist, cfg)
     return moves
 
 
@@ -452,6 +546,7 @@ def evaluate_candidates(adapter: Adapter, state: State, moves: list, C0: torch.T
     """C0: per-sample criterion of the ORIGINAL model on cfg.select_split."""
     k_cur = adapter.k_eff(state)
     out = []
+    tolerance = cfg.tol_abs + cfg.tol_frac * float(C0.mean())
     for m in moves:
         s2 = adapter.apply(state, m)
         if s2 is None:
@@ -467,7 +562,7 @@ def evaluate_candidates(adapter: Adapter, state: State, moves: list, C0: torch.T
             "move": m, "state": s2, "k": k_new, "dk": dk, "layer": m.layer,
             "crit": crit, "mean_crit": float(crit.mean()), "mean_loss": float(losses.mean()),
             "anch_mean": m0, "anch_se": se0,
-            "admissible": (m0 <= cfg.n_sigma * se0 + cfg.tol_abs) or not cfg.select_admissibility,
+            "admissible": (m0 <= cfg.n_sigma * se0 + tolerance) or not cfg.select_admissibility,
         })
     return out
 
@@ -499,18 +594,25 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
     L0 = adapter.per_sample(state0, cfg.select_split, cfg.criterion)
     separate_stop = cfg.stop != cfg.select_split
     S0 = adapter.per_sample(state0, cfg.stop, cfg.criterion) if separate_stop else None
+    stop_reference = S0 if separate_stop else L0
+    stop_tolerance = cfg.tol_abs + cfg.tol_frac * float(stop_reference.mean())
     k0 = adapter.k_eff(state0)
     state = state0
     rows = [_row(adapter, state, k0, step=0, method=label, kind="", site="",
-                 layer=-1, dk=0, anch_mean=0.0, anch_se=0.0, stop_mean=0.0, stop_se=0.0, stop_pass=True,
+                 move="", layer=-1, dk=0, pred_cost=float("nan"), anch_mean=0.0, anch_se=0.0,
+                 stop_mean=0.0, stop_se=0.0, stop_pass=True,
                  n_cands=0, n_adm=0, n_ties=0, seconds=0.0)]
     ctx, since = None, 0
     t0 = time.time()
     fails_at = None
+    stop_state = None
+    termination = "max_steps"
     for step in range(1, cfg.max_steps + 1):
         if fails_at is not None and step - fails_at > cfg.post_stop_steps:
+            termination = "stop_rule"
             break
         if 1.0 - adapter.k_eff(state) / k0 >= cfg.max_frac:
+            termination = "max_fraction"
             break
         if ctx is None or since >= cfg.refresh_every:
             ctx, since = refresh(adapter, state, cfg), 0
@@ -523,30 +625,48 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
             res = evaluate_candidates(adapter, state, moves, L0, cfg)
             chosen, n_adm, n_ties = select_move(res, cfg)
         if chosen is None:
+            termination = "no_admissible_candidate"
             if cfg.verbose:
                 print(f"[{label}] stop at step {step}: no admissible move "
                       f"among {len(res)} candidates")
             break
         if separate_stop:
             sm, sse = paired_stats(adapter.per_sample(chosen["state"], cfg.stop, cfg.criterion), S0)
-            stop_pass = bool(sm <= cfg.n_sigma * sse + cfg.tol_abs)
-            if not stop_pass and fails_at is None:
-                fails_at = step
-            if not stop_pass and cfg.stop_mode == "halt":
-                if cfg.verbose:
-                    print(f"[{label}] stop at step {step}: chosen move fails the "
-                          f"anchored test on '{cfg.stop}'")
-                break
         else:
-            sm, sse, stop_pass = chosen["anch_mean"], chosen["anch_se"], True
+            sm, sse = chosen["anch_mean"], chosen["anch_se"]
+        stop_pass = bool(sm <= cfg.n_sigma * sse + stop_tolerance)
+        if not stop_pass and fails_at is None:
+            fails_at = step
+            stop_state = state
+        if not stop_pass and cfg.stop_mode == "halt":
+            termination = "stop_rule"
+            if cfg.verbose:
+                print(f"[{label}] stop at step {step}: chosen move fails the "
+                      f"anchored test on '{cfg.stop}'")
+            break
         state = chosen["state"]
         since += 1
         mv = chosen["move"]
+        # Grouped-Fisher compensation depends on the complete current set of
+        # surviving activations and outgoing weights.  Never reuse a context
+        # containing those candidates after any state change.
+        if ctx is not None and ctx.get("fisher_moves"):
+            ctx = None
         rows.append(_row(adapter, state, k0, step=step, method=label, kind=mv.kind,
-                         site=mv.site, layer=mv.layer, dk=chosen["dk"],
+                         site=mv.site, move=mv.describe(), layer=mv.layer,
+                         dk=chosen["dk"], pred_cost=mv.pred_cost,
                          anch_mean=chosen["anch_mean"], anch_se=chosen["anch_se"],
                          stop_mean=sm, stop_se=sse, stop_pass=stop_pass,
                          n_cands=len(res), n_adm=n_adm, n_ties=n_ties,
+                         quant_case=mv.payload.get("quant_case"),
+                         quant_weight_groups=mv.payload.get("quant_weight_groups"),
+                         quant_total_groups=mv.payload.get("quant_total_groups"),
+                         quant_bias=mv.payload.get("quant_bias"),
+                         quant_step=mv.payload.get("quant_step"),
+                         n_deleted=mv.payload.get("n_deleted"),
+                         n_updates=mv.payload.get("n_updates"),
+                         closure_savings=mv.payload.get("closure_savings"),
+                         search_objective=mv.payload.get("search_objective"),
                          seconds=time.time() - t0))
         if cfg.verbose and step % cfg.log_every == 0:
             r = rows[-1]
@@ -559,7 +679,22 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
     bad = ~df["stop_pass"].values.astype(bool)
     first_fail = int(np.argmax(bad)) if bad.any() else len(df)
     df["within_stop"] = np.arange(len(df)) < first_fail
-    return df, state
+    df.attrs.update({
+        "termination_reason": termination,
+        "select_split": cfg.select_split,
+        "stop_split": cfg.stop,
+        "criterion": cfg.criterion,
+        "n_sigma": cfg.n_sigma,
+        "tol_abs": cfg.tol_abs,
+        "tol_frac": cfg.tol_frac,
+        "tie_break": cfg.tie_break,
+        "stop_mode": cfg.stop_mode,
+        "select_admissibility": cfg.select_admissibility,
+        "max_frac": cfg.max_frac,
+        "select_reference": float(L0.mean()),
+        "stop_reference": float(stop_reference.mean()),
+    })
+    return df, stop_state if stop_state is not None else state
 
 
 # --------------------------------------------------------------------------
@@ -583,8 +718,9 @@ def baseline_scores(adapter: Adapter, state0: State, method: str, cfg: PruneConf
         norms = adapter.input_norms(state0)
         return {k: state0.params[k].abs() * norms[k] for k in names}
     if method == "random":
-        g = torch.Generator().manual_seed(cfg.seed + 11)
-        return {k: torch.rand(state0.params[k].shape, generator=g) for k in names}
+        device = next(iter(state0.params.values())).device
+        g = torch.Generator(device=device).manual_seed(cfg.seed + 11)
+        return {k: torch.rand(state0.params[k].shape, generator=g, device=device) for k in names}
     raise ValueError(method)
 
 
@@ -593,9 +729,10 @@ def _anchored_columns(adapter: Adapter, s: State, ref: dict, cfg: PruneConfig) -
     out = {}
     for crit in ("loss", "error"):
         m0, se0 = paired_stats(adapter.per_sample(s, cfg.stop, crit), ref[crit])
+        tolerance = cfg.tol_abs + cfg.tol_frac * float(ref[crit].mean())
         out[f"anch_mean_{crit}"] = m0
         out[f"anch_se_{crit}"] = se0
-        out[f"admissible_{crit}"] = bool(m0 <= cfg.n_sigma * se0 + cfg.tol_abs)
+        out[f"admissible_{crit}"] = bool(m0 <= cfg.n_sigma * se0 + tolerance)
     return out
 
 

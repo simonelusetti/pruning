@@ -6,7 +6,7 @@ Round-4 transformer comparison with the stream move, version 2:
     with her own recipe (transformer.train_transformer, 3000 steps, data split = seed),
     exactly as nnprune.experiments.run_transformer does, and saved under OUT.
 
-Arms (her TF_BASE + FAIR_COMMON settings, valA chooses, valB stops):
+Arms (TF_BASE settings, valA chooses, valB stops):
   S | valA,  W+S | valA | fdist                     her moves only
   S+stream | valA,  W+S+stream | valA | fdist       + stream_mean
   stream only | valA
@@ -24,7 +24,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "NNpruning"))
 from nnprune import transformer as T  # noqa: E402
 from nnprune.core import PruneConfig, prune_path  # noqa: E402
-from nnprune.experiments import FAIR_COMMON, TF_BASE, split_validation  # noqa: E402
+from nnprune.experiments import TF_BASE, split_validation  # noqa: E402
 from tf_stream import STREAM_KINDS, StreamAdapter  # noqa: E402
 
 torch.set_num_threads(int(os.environ.get("THREADS", "1")))
@@ -40,6 +40,8 @@ ARMS = {
                                       struct_kinds=HER_KINDS + STREAM_KINDS),
     "stream only | valA": dict(select_split="valA", weight_per_site=0, struct_kinds=STREAM_KINDS),
 }
+LEGACY_COMMON = dict(tie_break="k_eff", criterion="loss", stop_split="valB",
+                     select_admissibility=False)
 
 
 def fname(arm, seed):
@@ -48,8 +50,8 @@ def fname(arm, seed):
 
 def base_state(seed, data):
     if seed == 0:
-        return torch.load(os.path.join(os.path.dirname(HERE), "NNpruning", "results", "transformer",
-                                       "base_state_seed0.pt"), weights_only=False)
+        return torch.load(os.path.join(os.path.dirname(HERE), "checkpoints",
+                                       "modadd_seed0.pt"), weights_only=False)
     f = os.path.join(OUT, f"base_state_seed{seed}.pt")
     if not os.path.exists(f):
         her = T.TransformerAdapter(data, p=59)
@@ -74,7 +76,8 @@ if __name__ == "__main__":
             print(f"SKIP seed {SEED} {arm} (exists)", flush=True)
             continue
         t = time.time()
-        cfg = PruneConfig(**{**TF_BASE, **FAIR_COMMON, **ARMS[arm], "seed": SEED, "verbose": True, "log_every": 50})
+        cfg = PruneConfig(**{**TF_BASE, **LEGACY_COMMON, **ARMS[arm],
+                             "seed": SEED, "verbose": True, "log_every": 50})
         try:
             df, _ = prune_path(ad, s0, cfg, label=arm)
         except Exception as e:                      # noqa: BLE001

@@ -41,7 +41,7 @@ stream_mean (ours, through the exact LayerNorm route): rotate the stream so that
   training mean m_k, i.e. add m_k * (row j of every matrix reading site k) to a bias
   applied BEFORE the division by s (pQ, pK, pV, p1, pU), and add m_k^2 to M_k; then
   delete coordinate j from every writer.  Exact for the network in which u.x is
-  replaced by m_k at every LayerNorm input (test_gpt_adapter.py).  Candidates are
+    replaced by m_k at every LayerNorm input.  Candidates are
   'fresh slots': the smallest eigen-directions of the pooled (n_pool) and per-site
   (n_each) centred covariances of the LayerNorm inputs, recomputed when applied.
 Single weights ('zero', chunks of 64) on every matrix, as in her W+S arms.
@@ -69,6 +69,17 @@ Stream moves at finer granularity (STREAM_FINE_KINDS).  A reader sees n = x / s;
   stream_mean on a touched coordinate j (payload j, no rotation): the global replacement
       at the sites that still read x_j, then all writers of j deleted.  Exact when every
       writer of j has been replaced by a constant (x_j is then constant at every site).
+Key / value sharing (KV_KINDS; grouped-query attention as a pruning move).  struct k_group[l, h]
+  (v_group) is the slot whose keys (values) head h uses; initially every head uses its own.
+  A slot's W_K, pK (W_V, pV) belong to its group, not to a head: a key dimension survives while
+  some member's query uses it, a value dimension while some member's W_O row uses it.
+  k_share(h -> g): h (alone in its key group) drops its keys and uses slot g's; its queries are
+      refitted, M_h = [W_Q; ...][W_K; ...]^T projected onto slot g's live key dimensions with her
+      key weighting:  Q' = M_h C_k K_g (K_g^T C_k K_g)^{-1}  (exact if K_h = K_g G).
+  v_share(h -> g): the same for values: O' = (V_g^T C_y V_g)^{-1} V_g^T C_y N_h, N_h = [W_V; pV] W_O,
+      C_y from h's own pattern (exact if V_h = V_g G).
+  qk_rank / ov_rank act on a whole group: the members' query factors (output maps) are stacked and
+  cut together (block-diagonal / pooled weighting); for a group of one this is her move.
 New moves (NEW_KINDS):
   emb_rank / pos_rank / unemb_rank  rank cut of W_E / W_pos / W_U by her activation-weighted
       SVD (weights: group frequencies of the characters for W_E, uniform positions for
@@ -110,6 +121,16 @@ STREAM_KINDS = ("stream_mean",)
 STREAM_FINE_KINDS = ("stream_site", "stream_read")
 STREAM_WRITE_KINDS = ("stream_write",)
 NEW_KINDS = ("emb_rank", "pos_rank", "unemb_rank", "token_merge", "head_merge")
+KV_KINDS = ("k_share", "v_share")
+CLASSIC_MOVES = HER_KINDS
+OUTDATED_MOVES = STREAM_KINDS + STREAM_FINE_KINDS + STREAM_WRITE_KINDS + NEW_KINDS + KV_KINDS
+EXTENSION_MOVES = ()
+MOVE_GROUPS = {
+    "classic": CLASSIC_MOVES,
+    "outdated": OUTDATED_MOVES,
+    "extension": EXTENSION_MOVES,
+    "fisher": (),
+}
 # stream-indexed tensors -> axis of the stream index
 WRITERS = {"W_E": 1, "W_pos": 1, "W_O": 3, "b_O": 1, "B_attn": 2, "W_2": 1, "b_2": 1, "E_b": 1, "Pos_b": 1}
 READERS = {"W_Q": 2, "W_K": 2, "W_V": 2, "W_1": 2, "W_U": 0, "U_a": 0}
@@ -117,6 +138,7 @@ FACTORS = {"emb_rank": ("W_E", "E_a", "E_b"), "pos_rank": ("W_pos", "Pos_a", "Po
            "unemb_rank": ("W_U", "U_a", "U_b")}
 STREAM_AX = {**WRITERS, **READERS}
 HEAD_T = ("W_Q", "W_K", "W_V", "W_O", "b_Q", "pQ", "pK", "pV")
+HEAD_OWN = ("W_Q", "b_Q", "pQ", "W_O")          # owned by the head; W_K, pK / W_V, pV are owned by its key / value group
 
 
 def make_data(seed=0, n_train=2048, n_stats=512, n_valA=512):
@@ -143,16 +165,18 @@ def _along(mask, ax):
 
 def householder(u, j, d):
     """Symmetric orthogonal H with H e_j = u (so x -> x H makes u.x coordinate j)."""
-    e = torch.zeros(d, dtype=torch.double); e[j] = 1
+    e = torch.zeros(d, dtype=torch.double, device=u.device); e[j] = 1
     w = u.double() - e
     if float(w.norm()) < 1e-12:
-        return torch.eye(d, dtype=torch.double)
+        return torch.eye(d, dtype=torch.double, device=u.device)
     w = w / w.norm()
-    return torch.eye(d, dtype=torch.double) - 2 * torch.outer(w, w)
+    return torch.eye(d, dtype=torch.double, device=u.device) - 2 * torch.outer(w, w)
 
 
 class GPTAdapter(Adapter):
+    move_groups = MOVE_GROUPS
     loss_type = "categorical"
+    fdist_sequence = True
     prunable = ["W_E", "W_pos", "W_Q", "W_K", "W_V", "W_O", "W_1", "W_2", "W_U"]
     site_layer = {n: i for i, n in enumerate(prunable)}       # only used by the 'layer' tie-breaks
 
@@ -201,7 +225,8 @@ class GPTAdapter(Adapter):
         struct = {"head_alive": torch.ones(L, H, dtype=torch.bool), "head_fixed": torch.zeros(L, H, dtype=torch.bool),
                   "A_fixed": torch.zeros(L, H, T, T), "unit_type": torch.full((L, self.dm), ACTIVE, dtype=torch.int8),
                   "stream_alive": torch.ones(d, dtype=torch.bool), "tok_group": torch.arange(self.V),
-                  "site_on": torch.ones(self.n_sites, d, dtype=torch.bool), "touched": torch.zeros(d, dtype=torch.bool)}
+                  "site_on": torch.ones(self.n_sites, d, dtype=torch.bool), "touched": torch.zeros(d, dtype=torch.bool),
+                  "k_group": torch.arange(H).repeat(L, 1), "v_group": torch.arange(H).repeat(L, 1)}
         s = State(Q, masks, struct)
         one = torch.full((d,), 1 / math.sqrt(d), dtype=torch.double)
         self._rotate(s, householder(one, d - 1, d))
@@ -253,8 +278,9 @@ class GPTAdapter(Adapter):
             sh = s1[:, None]
             q = (torch.einsum("btd,hde->bhte", inp(xr, s1, 2 * l, "W_Q"), P["W_Q"][l]) + P["pQ"][l][:, None]) / sh \
                 + P["b_Q"][l][:, None]
-            k = (torch.einsum("btd,hde->bhte", inp(xr, s1, 2 * l, "W_K"), P["W_K"][l]) + P["pK"][l][:, None]) / sh
-            v = (torch.einsum("btd,hde->bhte", inp(xr, s1, 2 * l, "W_V"), P["W_V"][l]) + P["pV"][l][:, None]) / sh
+            kg, vg = S["k_group"][l], S["v_group"][l]
+            k = (torch.einsum("btd,hde->bhte", inp(xr, s1, 2 * l, "W_K"), P["W_K"][l][kg]) + P["pK"][l][kg][:, None]) / sh
+            v = (torch.einsum("btd,hde->bhte", inp(xr, s1, 2 * l, "W_V"), P["W_V"][l][vg]) + P["pV"][l][vg][:, None]) / sh
             alive_h = S["head_alive"][l].to(x.dtype)[:, None, None]
             if cache:
                 A = torch.softmax((torch.einsum("bhte,bhse->bhts", q, k) / math.sqrt(self.dh))
@@ -296,6 +322,77 @@ class GPTAdapter(Adapter):
             self._cache_state = s
         return self._cache
 
+    @torch.no_grad()
+    def input_norms(self, s):
+        """Input-column norms used by the repository's one-shot Wanda baseline.
+
+        The returned tensors broadcast to the corresponding weight tensors.  As in
+        the other adapters, ranking is global; this supplies Wanda's activation-aware
+        score but does not change the core baseline to Wanda's per-output-row budget.
+        """
+        X = self.data["train"][0]
+        P, S = self.effective(s), s.struct
+        _, c = self._forward(P, S, X, cache=True)
+
+        token_n = torch.bincount(X.reshape(-1), minlength=self.V).to(P["W_E"].dtype).sqrt()
+        qkv_n, wo_n, w1_n, w2_n = [], [], [], []
+        for l in range(self.L):
+            n1 = c["x"][2 * l] / c["s"][2 * l]
+            qkv_n.append(n1.pow(2).sum((0, 1)).sqrt())
+
+            vg = S["v_group"][l]
+            v = torch.einsum("btd,hde->bhte", n1, P["W_V"][l][vg])
+            v = v + P["pV"][l][vg][None, :, None] / c["s"][2 * l][:, None]
+            attended = torch.einsum("bhts,bhse->bhte", c["A"][l], v)
+            wo_n.append(attended.pow(2).sum((0, 2)).sqrt())
+
+            n2 = c["x"][2 * l + 1] / c["s"][2 * l + 1]
+            w1_n.append(n2.pow(2).sum((0, 1)).sqrt())
+            w2_n.append(c["act"][l].pow(2).sum((0, 1)).sqrt())
+
+        nf = c["x"][-1] / c["s"][-1]
+        return {
+            "W_E": token_n[:, None],
+            "W_pos": torch.full((self.T, 1), math.sqrt(len(X)), dtype=P["W_pos"].dtype,
+                                device=X.device),
+            "W_Q": torch.stack(qkv_n)[:, None, :, None],
+            "W_K": torch.stack(qkv_n)[:, None, :, None],
+            "W_V": torch.stack(qkv_n)[:, None, :, None],
+            "W_O": torch.stack(wo_n)[:, :, :, None],
+            "W_1": torch.stack(w1_n)[:, None, :],
+            "W_2": torch.stack(w2_n)[:, None, :],
+            "W_U": nf.pow(2).sum((0, 1)).sqrt()[:, None],
+        }
+
+    @torch.no_grad()
+    def classical_unit_order(self, s):
+        """One-shot mean-ablation order for all live MLP units and heads."""
+        P = self.effective(s)
+        _, c = self._forward(P, s.struct, self.data["train"][0], cache=True)
+        items = []
+        for l in range(self.L):
+            act = c["act"][l].reshape(-1, self.dm)
+            unit_score = act.var(0, unbiased=False) * P["W_2"][l].pow(2).sum(0)
+            for i in (s.struct["unit_type"][l] == ACTIVE).nonzero().flatten().tolist():
+                items.append((float(unit_score[i]), ("unit", l, i)))
+
+            ho = c["ho"][l].permute(1, 0, 2, 3).reshape(self.H, -1, self.d)
+            head_score = ho.var(1, unbiased=False).sum(1)
+            for h in s.struct["head_alive"][l].nonzero().flatten().tolist():
+                items.append((float(head_score[h]), ("head", l, h)))
+        return [item for _, item in sorted(items, key=lambda z: z[0])]
+
+    @torch.no_grad()
+    def mean_move(self, s, item):
+        """Construct the current-network mean replacement used by unit_baseline_path."""
+        kind, l, i = item
+        _, c = self._forward(self.effective(s), s.struct, self.data["train"][0], cache=True)
+        if kind == "unit":
+            mean = float(c["act"][l][..., i].mean())
+            return Move("unit_mean", f"mlp{l}", l, {"l": l, "i": i, "mean": mean})
+        mean = c["ho"][l][:, i].mean((0, 1))
+        return Move("head_mean", f"L{l}h{i}", l, {"l": l, "h": i, "mean": mean})
+
     def apply(self, state, move):
         self._cur = self._stats(state) if move.kind != "zero" else None
         return super().apply(state, move)
@@ -332,14 +429,14 @@ class GPTAdapter(Adapter):
             s.params[n] = (val * nm.to(val.dtype)).contiguous()
 
     def _kill_head(self, s, l, h):
-        for n in HEAD_T:
+        for n in HEAD_OWN:
             if bool(s.masks[n][l, h].any()):
                 self._zero(s, n, (l, h))
         s.struct["head_alive"][l, h] = False
         s.struct["head_fixed"][l, h] = False
 
     def _zero_qk(self, s, l, h):
-        for n in ("W_Q", "W_K", "b_Q", "pQ", "pK"):
+        for n in ("W_Q", "b_Q", "pQ"):                  # the keys belong to the group: cleaned up if unused
             if bool(s.masks[n][l, h].any()):
                 self._zero(s, n, (l, h))
 
@@ -353,15 +450,30 @@ class GPTAdapter(Adapter):
         s.params["b_2"][l] += W[l, :, i] * M[l, :, i].to(W.dtype) * c
         self._kill_unit(s, l, i)
 
-    def qk_dims(self, s, l, h):
+    def _q_side(self, s, l, h):
         m = s.masks
-        q = m["W_Q"][l, h].any(0) | m["pQ"][l, h] | m["b_Q"][l, h]
-        k = m["W_K"][l, h].any(0) | m["pK"][l, h]
-        return q & k
+        return m["W_Q"][l, h].any(0) | m["pQ"][l, h] | m["b_Q"][l, h]
+
+    def _k_slot(self, s, l, g):
+        return s.masks["W_K"][l, g].any(0) | s.masks["pK"][l, g]
+
+    def _v_slot(self, s, l, g):
+        return s.masks["W_V"][l, g].any(0) | s.masks["pV"][l, g]
+
+    def qk_dims(self, s, l, h):
+        return self._q_side(s, l, h) & self._k_slot(s, l, int(s.struct["k_group"][l, h]))
 
     def ov_dims(self, s, l, h):
-        m = s.masks
-        return (m["W_V"][l, h].any(0) | m["pV"][l, h]) & m["W_O"][l, h].any(1)
+        return self._v_slot(s, l, int(s.struct["v_group"][l, h])) & s.masks["W_O"][l, h].any(1)
+
+    def k_members(self, s, l, g):
+        st = s.struct
+        return [h for h in range(self.H) if bool(st["head_alive"][l, h]) and not bool(st["head_fixed"][l, h])
+                and int(st["k_group"][l, h]) == g]
+
+    def v_members(self, s, l, g):
+        st = s.struct
+        return [h for h in range(self.H) if bool(st["head_alive"][l, h]) and int(st["v_group"][l, h]) == g]
 
     # ---- ownership graph and canonicalisation ---------------------------------------------------------------
     #
@@ -376,8 +488,10 @@ class GPTAdapter(Adapter):
     #   family            node                    consumer / input                         rule
     #   dead_stream       dead stream coordinate  -                                        delete every entry on it
     #   factors           factor dimension k      a[:, k] and b[k, :] both live            else delete both sides
-    #   qk_dims           head dimension (QK)     query side and key side both live        else delete both sides
-    #   ov_dims           head dimension (OV)     value side and W_O row both live         else delete both sides
+    #   qk_dims           query dims of a head    its key group has that key dimension     else delete the query side
+    #                     key dims of a group     some non-fixed member's query uses it    else delete the key side
+    #   ov_dims           W_O rows of a head      its value group has that value dimension else delete the row
+    #                     value dims of a group   some member's W_O row uses it            else delete the value side
     #   heads             head                    some OV dimension live; fixed head: no QK  else delete the head
     #   units             MLP unit                fan-out live / fan-in live               delete / fold GELU(b) into b_2
     #   writer_columns    writer column j         a site after the writer reads x_j        else delete the column
@@ -427,8 +541,25 @@ class GPTAdapter(Adapter):
             changed |= self._kill(s, b, (~live)[:, None].expand_as(s.masks[b]))
         return changed
 
-    def _f_qk_dims(self, s):
+    def _kill_dims(self, s, specs, l, h, dead):
+        """Delete head dimensions `dead` of the listed tensors at (l, h).  spec: (name, matrix?)."""
         changed = False
+        for n, matrix in specs:
+            mk = torch.zeros_like(s.masks[n])
+            if matrix == "cols":
+                mk[l, h] = dead[None, :]
+            elif matrix == "rows":
+                mk[l, h] = dead[:, None]
+            else:
+                mk[l, h] = dead
+            changed |= self._kill(s, n, mk)
+        return changed
+
+    def _f_qk_dims(self, s):
+        """Query side of a head lives where its key group has a key; a key dimension of a group
+        lives where some (non-fixed) member's query does."""
+        changed = False
+        qside = (("W_Q", "cols"), ("b_Q", None), ("pQ", None))
         for l in range(self.L):
             for h in range(self.H):
                 if not bool(s.struct["head_alive"][l, h]):
@@ -436,31 +567,31 @@ class GPTAdapter(Adapter):
                 dead = ~self.qk_dims(s, l, h)
                 if bool(s.struct["head_fixed"][l, h]):
                     dead = torch.ones_like(dead)                # a fixed pattern has no QK consumer
-                if not bool(dead.any()):
-                    continue
-                for n in ("W_Q", "W_K"):
-                    mk = torch.zeros_like(s.masks[n]); mk[l, h] = dead[None, :]
-                    changed |= self._kill(s, n, mk)
-                for n in ("b_Q", "pQ", "pK"):
-                    mk = torch.zeros_like(s.masks[n]); mk[l, h] = dead
-                    changed |= self._kill(s, n, mk)
+                if bool(dead.any()):
+                    changed |= self._kill_dims(s, qside, l, h, dead)
+            for g in range(self.H):
+                need = torch.zeros(self.dh, dtype=torch.bool, device=s.params["W_K"].device)
+                for h in self.k_members(s, l, g):
+                    need |= self._q_side(s, l, h)
+                changed |= self._kill_dims(s, (("W_K", "cols"), ("pK", None)), l, g, ~need)
         return changed
 
     def _f_ov_dims(self, s):
+        """W_O rows of a head live where its value group has a value; a value dimension of a group
+        lives where some member's W_O row does."""
         changed = False
         for l in range(self.L):
             for h in range(self.H):
                 if not bool(s.struct["head_alive"][l, h]):
                     continue
                 dead = ~self.ov_dims(s, l, h)
-                if not bool(dead.any()):
-                    continue
-                mk = torch.zeros_like(s.masks["W_V"]); mk[l, h] = dead[None, :]
-                changed |= self._kill(s, "W_V", mk)
-                mk = torch.zeros_like(s.masks["pV"]); mk[l, h] = dead
-                changed |= self._kill(s, "pV", mk)
-                mk = torch.zeros_like(s.masks["W_O"]); mk[l, h] = dead[:, None]
-                changed |= self._kill(s, "W_O", mk)
+                if bool(dead.any()):
+                    changed |= self._kill_dims(s, (("W_O", "rows"),), l, h, dead)
+            for g in range(self.H):
+                need = torch.zeros(self.dh, dtype=torch.bool, device=s.params["W_V"].device)
+                for h in self.v_members(s, l, g):
+                    need |= s.masks["W_O"][l, h].any(1)
+                changed |= self._kill_dims(s, (("W_V", "cols"), ("pV", None)), l, g, ~need)
         return changed
 
     def _f_heads(self, s):
@@ -470,7 +601,7 @@ class GPTAdapter(Adapter):
             for h in range(self.H):
                 if bool(st["head_alive"][l, h]) and bool(self.ov_dims(s, l, h).any()):
                     continue
-                if bool(st["head_alive"][l, h]) or any(bool(s.masks[n][l, h].any()) for n in HEAD_T):
+                if bool(st["head_alive"][l, h]) or any(bool(s.masks[n][l, h].any()) for n in HEAD_OWN):
                     self._kill_head(s, l, h)
                     changed = True
         return changed
@@ -484,13 +615,14 @@ class GPTAdapter(Adapter):
                 self._kill_unit(s, l, i); changed = True
             fan_in = s.masks["W_1"][l].any(1) | s.masks["p1"][l]
             for i in ((s.struct["unit_type"][l] == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                b = s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i]) else torch.tensor(0.0)
+                b = s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i]) else s.params["b_1"].new_zeros(())
                 self._fold_unit(s, l, i, float(F.gelu(b))); changed = True
         return changed
 
     def _f_writer_columns(self, s):
         reads_after = [None] * (self.n_sites + 1)
-        reads_after[self.n_sites] = torch.zeros(self.d, dtype=torch.bool)
+        reads_after[self.n_sites] = torch.zeros(self.d, dtype=torch.bool,
+                                                device=s.struct["stream_alive"].device)
         for k in range(self.n_sites - 1, -1, -1):
             reads_after[k] = reads_after[k + 1] | self._reads_at(s, k)
         groups = [(n, None, 0) for n in ("W_E", "W_pos", "E_b", "Pos_b")]
@@ -510,7 +642,7 @@ class GPTAdapter(Adapter):
 
     def _f_unwritten(self, s):
         alive = s.struct["stream_alive"]
-        written = torch.zeros(self.d, dtype=torch.bool)
+        written = torch.zeros(self.d, dtype=torch.bool, device=alive.device)
         for n, ax in WRITERS.items():
             written |= _along(s.masks[n], ax)
         changed = False
@@ -547,7 +679,7 @@ class GPTAdapter(Adapter):
         Lc = self.pristine(s).nonzero().flatten()
         n_slots = self.n_pool + self.n_each * self.n_sites
         if len(Lc) <= 1:
-            return [torch.zeros(self.d, dtype=torch.double)] * n_slots
+            return [torch.zeros(self.d, dtype=torch.double, device=Lc.device)] * n_slots
         Cs = []
         for x in c["x"]:
             a = x[..., Lc].reshape(-1, len(Lc)).double()
@@ -558,7 +690,7 @@ class GPTAdapter(Adapter):
         for C, n in [(sum(Cs), self.n_pool)] + [(C, self.n_each) for C in Cs]:
             _, E = torch.linalg.eigh(C)
             for i in range(n):
-                v = torch.zeros(self.d, dtype=torch.double)
+                v = torch.zeros(self.d, dtype=torch.double, device=Lc.device)
                 if i < E.shape[1]:
                     v[Lc] = E[:, i]
                 vecs.append(v)
@@ -621,7 +753,7 @@ class GPTAdapter(Adapter):
             n = n - n.mean(0)
             C = n.T @ n / len(n)
             w, E = torch.linalg.eigh(C)
-            full = lambda e: torch.zeros(self.d, dtype=torch.double).index_put_((Lc,), e)
+            full = lambda e: torch.zeros(self.d, dtype=torch.double, device=Lc.device).index_put_((Lc,), e)
             out[("site", k)] = [full(E[:, i]) if i < E.shape[1] else None for i in range(self.n_site)]
             for name, l in self.site_readers(k):
                 W = self._reader_matrix(s, name, l)[Lc].double()
@@ -650,7 +782,8 @@ class GPTAdapter(Adapter):
         if name == "W_Q":
             P["b_Q"][l] += cval * E["W_Q"][l][:, j, :]
         elif name == "W_V":
-            P["b_O"][l] += cval * torch.einsum("he,hed->d", E["W_V"][l][:, j, :], E["W_O"][l])
+            vg = s.struct["v_group"][l]
+            P["b_O"][l] += cval * torch.einsum("he,hed->d", E["W_V"][l][vg][:, j, :], E["W_O"][l])
         elif name == "W_1":
             P["b_1"][l] += cval * E["W_1"][l][:, j]
         elif name == "W_U":
@@ -669,7 +802,7 @@ class GPTAdapter(Adapter):
         if u is not None:
             vec = u
         elif j is not None and bool(st["stream_alive"][j]) and bool(st["touched"][j]):
-            vec = torch.zeros(self.d, dtype=torch.double); vec[j] = 1
+            vec = torch.zeros(self.d, dtype=torch.double, device=st["stream_alive"].device); vec[j] = 1
         else:
             return False
         xk, sk = c["x"][k].double(), c["s"][k].double()
@@ -732,7 +865,7 @@ class GPTAdapter(Adapter):
             a = self._writer_contrib(s, c, w)[..., Lc].reshape(-1, len(Lc)).double()
             a = a - a.mean(0)
             _, E = torch.linalg.eigh(a.T @ a / len(a))
-            out[w] = [torch.zeros(self.d, dtype=torch.double).index_put_((Lc,), E[:, i]) if i < E.shape[1] else None
+            out[w] = [torch.zeros(self.d, dtype=torch.double, device=Lc.device).index_put_((Lc,), E[:, i]) if i < E.shape[1] else None
                       for i in range(self.n_site)]
         return out
 
@@ -742,7 +875,7 @@ class GPTAdapter(Adapter):
         if u is not None:
             vec = u
         elif j is not None and bool(st["stream_alive"][j]) and bool(st["touched"][j]):
-            vec = torch.zeros(self.d, dtype=torch.double); vec[j] = 1
+            vec = torch.zeros(self.d, dtype=torch.double, device=st["stream_alive"].device); vec[j] = 1
         else:
             return False
         mu = float((self._writer_contrib(s, c, w).double() @ vec).mean())
@@ -761,7 +894,7 @@ class GPTAdapter(Adapter):
                 if bool(M[n][:, j].any()):
                     self._zero(s, n, (slice(None), j))
         elif w == "pos":
-            reps = st["tok_group"] == torch.arange(self.V)
+            reps = st["tok_group"] == torch.arange(self.V, device=st["tok_group"].device)
             P["W_E"][reps, j] = P["W_E"][reps, j] * M["W_E"][reps, j] + mu; M["W_E"][reps, j] = True
             for n in ("W_pos", "Pos_b"):
                 if bool(M[n][:, j].any()):
@@ -812,45 +945,131 @@ class GPTAdapter(Adapter):
     # ---- rank cuts on the augmented inputs --------------------------------------------------------------
     @torch.no_grad()
     def _rank_cut(self, s, c, kind, l, h):
-        Lc = s.struct["stream_alive"].nonzero().flatten()
+        """Rank cut of the key (value) group of head h: the members' query factors are stacked with
+        block-diagonal weights (their output maps side by side with pooled weights) and cut together
+        with the group's keys (values).  For a group of one this is her qk_rank / ov_rank."""
+        st = s.struct
+        Lc = st["stream_alive"].nonzero().flatten()
         nL = len(Lc)
         x, sc = c["x"][2 * l][..., Lc].double(), c["s"][2 * l].double()
-        E = lambda n: s.params[n][l, h] * s.masks[n][l, h].to(s.params[n].dtype)
+        E = lambda n, hh: s.params[n][l, hh] * s.masks[n][l, hh].to(s.params[n].dtype)
+        feats = {"pQ": 1 / sc, "pK": 1 / sc, "pV": 1 / sc, "b_Q": torch.ones_like(sc)}
         if kind == "qk_rank":
-            r = int(self.qk_dims(s, l, h).sum()) - 1
-            if r < 1:
+            g = int(st["k_group"][l, h])
+            mem = self.k_members(s, l, g)
+            used = torch.zeros(self.dh, dtype=torch.bool, device=Lc.device)
+            for m in mem:
+                used |= self.qk_dims(s, l, m)
+            r = int(used.sum()) - 1
+            if r < 1 or not mem:
                 return False
-            inc_q = [n for n in ("pQ", "b_Q") if bool(s.masks[n][l, h].any())]
-            inc_k = [n for n in ("pK",) if bool(s.masks[n][l, h].any())]
-            feats = {"pQ": 1 / sc, "pK": 1 / sc, "b_Q": torch.ones_like(sc)}
-            aq = torch.cat([x / sc] + [feats[n] for n in inc_q], -1).reshape(-1, nL + len(inc_q))
+            inc_k = [n for n in ("pK",) if bool(s.masks[n][l, g].any())]
             ak = torch.cat([x / sc] + [feats[n] for n in inc_k], -1).reshape(-1, nL + len(inc_k))
-            WQ = torch.cat([E("W_Q")[Lc]] + [E(n)[None] for n in inc_q]).double()
-            WK = torch.cat([E("W_K")[Lc]] + [E(n)[None] for n in inc_k]).double()
-            A, B = weighted_lowrank(WQ @ WK.T, aq.T @ aq / len(aq), ak.T @ ak / len(ak), r)
-            for F_, W, inc in ((A, "W_Q", inc_q), (B, "W_K", inc_k)):
-                self._write_factor(s, W, inc, l, h, Lc, F_, r)
+            WK = torch.cat([E("W_K", g)[Lc]] + [E(n, g)[None] for n in inc_k]).double()
+            WQs, Cqs, incs = [], [], []
+            for m in mem:
+                inc_q = [n for n in ("pQ", "b_Q") if bool(s.masks[n][l, m].any())]
+                aq = torch.cat([x / sc] + [feats[n] for n in inc_q], -1).reshape(-1, nL + len(inc_q))
+                WQs.append(torch.cat([E("W_Q", m)[Lc]] + [E(n, m)[None] for n in inc_q]).double())
+                Cqs.append(aq.T @ aq / len(aq)); incs.append(inc_q)
+            A, B = weighted_lowrank(torch.cat(WQs) @ WK.T, torch.block_diag(*Cqs), ak.T @ ak / len(ak), r)
+            i0 = 0
+            for m, Wm, inc_q in zip(mem, WQs, incs):
+                self._write_factor(s, "W_Q", inc_q, l, m, Lc, A[i0:i0 + len(Wm)], r)
+                i0 += len(Wm)
+            self._write_factor(s, "W_K", inc_k, l, g, Lc, B, r)
             return True
-        r = int(self.ov_dims(s, l, h).sum()) - 1
-        if r < 1:
+        g = int(st["v_group"][l, h])
+        mem = self.v_members(s, l, g)
+        used = torch.zeros(self.dh, dtype=torch.bool, device=Lc.device)
+        for m in mem:
+            used |= self.ov_dims(s, l, m)
+        r = int(used.sum()) - 1
+        if r < 1 or not mem:
             return False
-        inc_v = [n for n in ("pV",) if bool(s.masks[n][l, h].any())]
-        av = torch.cat([x / sc] + [1 / sc for _ in inc_v], -1)                        # (n, T, nL + .)
+        inc_v = [n for n in ("pV",) if bool(s.masks[n][l, g].any())]
+        av = torch.cat([x / sc] + [feats[n] for n in inc_v], -1)                        # (n, T, nL + .)
+        Cy = 0
+        for m in mem:
+            y = torch.einsum("nts,nsk->ntk", c["A"][l][:, m].double(), av).reshape(-1, av.shape[-1])
+            Cy = Cy + y.T @ y / len(y)
+        WV = torch.cat([E("W_V", g)[Lc]] + [E(n, g)[None] for n in inc_v]).double()
+        N = WV @ torch.cat([E("W_O", m)[:, Lc].double() for m in mem], 1)
+        A, B = weighted_lowrank(N, Cy, torch.eye(nL * len(mem), dtype=torch.double,
+                                                 device=N.device), r)
+        self._write_factor(s, "W_V", inc_v, l, g, Lc, A, r)
+        rows = torch.arange(r, device=Lc.device)
+        for i, m in enumerate(mem):
+            self._zero(s, "W_O", (l, m))
+            s.params["W_O"][l, m][rows[:, None], Lc[None, :]] = B[i * nL:(i + 1) * nL].T
+            s.masks["W_O"][l, m][rows[:, None], Lc[None, :]] = True
+        return True
+
+    # ---- key / value sharing ------------------------------------------------------------------------------
+    def _alone(self, s, l, h, which):
+        """h is the only user of its own key (value) slot."""
+        st = s.struct
+        grp = st["k_group" if which == "k" else "v_group"][l]
+        mem = self.k_members(s, l, h) if which == "k" else self.v_members(s, l, h)
+        return int(grp[h]) == h and mem == [h]
+
+    @torch.no_grad()
+    def _k_share(self, s, c, l, h, g):
+        st = s.struct
+        if h == g or not self._alone(s, l, h, "k") or not self.k_members(s, l, g):
+            return False
+        Lc = st["stream_alive"].nonzero().flatten()
+        nL = len(Lc)
+        x, sc = c["x"][2 * l][..., Lc].double(), c["s"][2 * l].double()
+        E = lambda n, hh: (s.params[n][l, hh] * s.masks[n][l, hh].to(s.params[n].dtype)).double()
+        inc_k = bool(s.masks["pK"][l, h].any() or s.masks["pK"][l, g].any())
+        ak = torch.cat([x / sc] + ([1 / sc] if inc_k else []), -1).reshape(-1, nL + int(inc_k))
+        Ck = ak.T @ ak / len(ak)
+        K = lambda hh: torch.cat([E("W_K", hh)[Lc]] + ([E("pK", hh)[None]] if inc_k else []))
+        inc_q = [n for n in ("pQ", "b_Q") if bool(s.masks[n][l, h].any())]
+        WQ = torch.cat([E("W_Q", h)[Lc]] + [E(n, h)[None] for n in inc_q])
+        kd = self._k_slot(s, l, g).nonzero().flatten()
+        Kg = K(g)[:, kd]
+        G_ = Kg.T @ Ck @ Kg
+        Qn = (WQ @ K(h).T) @ Ck @ Kg @ torch.linalg.pinv(G_, hermitian=True)          # (dq, |kd|)
+        for n in ["W_Q"] + inc_q:
+            self._zero(s, n, (l, h))
+        s.params["W_Q"][l, h][Lc[:, None], kd[None, :]] = Qn[:nL].float()
+        s.masks["W_Q"][l, h][Lc[:, None], kd[None, :]] = True
+        for i, n in enumerate(inc_q):
+            s.params[n][l, h][kd] = Qn[nL + i].float()
+            s.masks[n][l, h][kd] = True
+        st["k_group"][l, h] = g
+        return True
+
+    @torch.no_grad()
+    def _v_share(self, s, c, l, h, g):
+        st = s.struct
+        if h == g or not self._alone(s, l, h, "v") or not self.v_members(s, l, g):
+            return False
+        Lc = st["stream_alive"].nonzero().flatten()
+        nL = len(Lc)
+        x, sc = c["x"][2 * l][..., Lc].double(), c["s"][2 * l].double()
+        E = lambda n, hh: (s.params[n][l, hh] * s.masks[n][l, hh].to(s.params[n].dtype)).double()
+        inc_v = bool(s.masks["pV"][l, h].any() or s.masks["pV"][l, g].any())
+        av = torch.cat([x / sc] + ([1 / sc] if inc_v else []), -1)
         y = torch.einsum("nts,nsk->ntk", c["A"][l][:, h].double(), av).reshape(-1, av.shape[-1])
-        WV = torch.cat([E("W_V")[Lc]] + [E(n)[None] for n in inc_v]).double()
-        A, B = weighted_lowrank(WV @ E("W_O")[:, Lc].double(), y.T @ y / len(y),
-                                torch.eye(nL, dtype=torch.double), r)
-        self._write_factor(s, "W_V", inc_v, l, h, Lc, A, r)
+        Cy = y.T @ y / len(y)
+        V = lambda hh: torch.cat([E("W_V", hh)[Lc]] + ([E("pV", hh)[None]] if inc_v else []))
+        vd = self._v_slot(s, l, g).nonzero().flatten()
+        Vg = V(g)[:, vd]
+        Nh = V(h) @ E("W_O", h)[:, Lc]
+        On = torch.linalg.pinv(Vg.T @ Cy @ Vg, hermitian=True) @ Vg.T @ Cy @ Nh         # (|vd|, nL)
         self._zero(s, "W_O", (l, h))
-        rows = torch.arange(r)
-        s.params["W_O"][l, h][rows[:, None], Lc[None, :]] = B.T
-        s.masks["W_O"][l, h][rows[:, None], Lc[None, :]] = True
+        s.params["W_O"][l, h][vd[:, None], Lc[None, :]] = On.float()
+        s.masks["W_O"][l, h][vd[:, None], Lc[None, :]] = True
+        st["v_group"][l, h] = g
         return True
 
     def _write_factor(self, s, W, inc, l, h, Lc, F_, r):
         for n in [W] + inc:
             self._zero(s, n, (l, h))
-        cols = torch.arange(r)
+        cols = torch.arange(r, device=Lc.device)
         s.params[W][l, h][Lc[:, None], cols[None, :]] = F_[:len(Lc)]
         s.masks[W][l, h][Lc[:, None], cols[None, :]] = True
         for i, n in enumerate(inc):
@@ -863,11 +1082,12 @@ class GPTAdapter(Adapter):
         dense, a, b = FACTORS[kind]
         Lc = s.struct["stream_alive"].nonzero().flatten()
         if kind == "emb_rank":
-            rows, cols = (s.struct["tok_group"] == torch.arange(self.V)).nonzero().flatten(), Lc
+            rows, cols = (s.struct["tok_group"] == torch.arange(
+                self.V, device=Lc.device)).nonzero().flatten(), Lc
         elif kind == "pos_rank":
-            rows, cols = torch.arange(self.T), Lc
+            rows, cols = torch.arange(self.T, device=Lc.device), Lc
         else:
-            rows, cols = Lc, torch.arange(self.V)
+            rows, cols = Lc, torch.arange(self.V, device=Lc.device)
         r = int((s.masks[a].any(0) & s.masks[b].any(1)).sum())
         return rows, cols, int(s.masks[dense].sum()), (r if r > 0 else None)
 
@@ -892,15 +1112,16 @@ class GPTAdapter(Adapter):
             fr = torch.stack([self.data["freq"][g == int(i)].sum() for i in rows])
             Cl = torch.diag(fr / fr.sum())
         elif kind == "pos_rank":
-            Cl = torch.eye(len(rows), dtype=torch.double)
+            Cl = torch.eye(len(rows), dtype=torch.double, device=W.device)
         else:
             y = (c["x"][-1][..., rows] / c["s"][-1]).reshape(-1, len(rows)).double()
             Cl = y.T @ y / len(y)
-        A, B = weighted_lowrank(W, Cl, torch.eye(len(cols), dtype=torch.double), r)
+        A, B = weighted_lowrank(W, Cl, torch.eye(len(cols), dtype=torch.double,
+                                                 device=W.device), r)
         for n in (dense, a, b):
             if bool(s.masks[n].any()):
                 zero_entries(s, n, s.masks[n].clone())
-        k = torch.arange(r)
+        k = torch.arange(r, device=W.device)
         s.params[a][rows[:, None], k[None, :]] = A; s.masks[a][rows[:, None], k[None, :]] = True
         s.params[b][k[:, None], cols[None, :]] = B.T; s.masks[b][k[:, None], cols[None, :]] = True
         return True
@@ -929,6 +1150,8 @@ class GPTAdapter(Adapter):
         st = s.struct
         if h == h2 or not (bool(st["head_alive"][l, h]) and bool(st["head_alive"][l, h2])):
             return False
+        if not all(self._alone(s, l, hh, w) for hh in (h, h2) for w in ("k", "v")):
+            return False
         Lc = st["stream_alive"].nonzero().flatten()
         nL = len(Lc)
         r = min(self.dh, int(self.ov_dims(s, l, h).sum()) + int(self.ov_dims(s, l, h2).sum()))
@@ -941,10 +1164,11 @@ class GPTAdapter(Adapter):
         for hh in (h, h2):
             WV = torch.cat([E("W_V", hh)[Lc]] + ([E("pV", hh)[None]] if inc else []))
             N = N + WV @ E("W_O", hh)[:, Lc]
-        A, B = weighted_lowrank(N, y.T @ y / len(y), torch.eye(nL, dtype=torch.double), r)
+        A, B = weighted_lowrank(N, y.T @ y / len(y), torch.eye(nL, dtype=torch.double,
+                                                               device=N.device), r)
         self._write_factor(s, "W_V", ["pV"] if inc else [], l, h2, Lc, A, r)
         self._zero(s, "W_O", (l, h2))
-        k = torch.arange(r)
+        k = torch.arange(r, device=Lc.device)
         s.params["W_O"][l, h2][k[:, None], Lc[None, :]] = B.T
         s.masks["W_O"][l, h2][k[:, None], Lc[None, :]] = True
         self._kill_head(s, l, h)
@@ -965,18 +1189,19 @@ class GPTAdapter(Adapter):
             ok = sd > 1e-8
             Cr = (Ac.T @ Ac) / len(A) / (sd[:, None] * sd[None, :]).clamp_min(1e-16)
             Cr = Cr * (ok[:, None] & ok[None, :])
-            iu = torch.triu_indices(len(ids), len(ids), 1)
+            iu = torch.triu_indices(len(ids), len(ids), 1, device=ids.device)
             vals = Cr[iu[0], iu[1]].abs()
             for t_ in torch.argsort(vals, descending=True)[: cfg.n_merge].tolist():
                 a_, b_ = int(ids[iu[0, t_]]), int(ids[iu[1, t_]])
                 pairs += [(l, a_, b_), (l, b_, a_)]
         g = s.struct["tok_group"]
-        reps = (g == torch.arange(self.V)).nonzero().flatten()
+        reps = (g == torch.arange(self.V, device=g.device)).nonzero().flatten()
         E = self.effective(s)
         Em = (E["W_E"] + E["E_a"] @ E["E_b"])[reps].double()
-        f = torch.tensor([self._group_freq(s, int(i)) for i in reps], dtype=torch.double)
+        f = torch.tensor([self._group_freq(s, int(i)) for i in reps], dtype=torch.double,
+                         device=g.device)
         cost = (f[:, None] * f[None, :] / (f[:, None] + f[None, :]).clamp_min(1e-30)) * torch.cdist(Em, Em).pow(2)
-        iu = torch.triu_indices(len(reps), len(reps), 1)
+        iu = torch.triu_indices(len(reps), len(reps), 1, device=reps.device)
         tok = []
         for t_ in torch.argsort(cost[iu[0], iu[1]])[: self.n_tok].tolist():
             a_, b_ = int(reps[iu[0, t_]]), int(reps[iu[1, t_]])
@@ -993,12 +1218,14 @@ class GPTAdapter(Adapter):
                 for k in ("head_off", "head_mean", "head_mean_pos"):
                     mv.append(Move(k, site, l, {"l": l, "h": h}))
                 qk = int(self.qk_dims(s, l, h).sum())
+                kmem = self.k_members(s, l, int(st["k_group"][l, h]))
+                vmem = self.v_members(s, l, int(st["v_group"][l, h]))
                 if not bool(st["head_fixed"][l, h]) and qk > 0:
                     mv.append(Move("attn_uniform", site, l, {"l": l, "h": h}))
                     mv.append(Move("attn_fixed", site, l, {"l": l, "h": h}))
-                    if qk > 1:
+                    if int(self._k_slot(s, l, int(st["k_group"][l, h])).sum()) > 1 and kmem and kmem[0] == h:
                         mv.append(Move("qk_rank", site, l, {"l": l, "h": h}))
-                if int(self.ov_dims(s, l, h).sum()) > 1:
+                if int(self._v_slot(s, l, int(st["v_group"][l, h])).sum()) > 1 and vmem and vmem[0] == h:
                     mv.append(Move("ov_rank", site, l, {"l": l, "h": h}))
             for i in (st["unit_type"][l] == ACTIVE).nonzero().flatten().tolist():
                 mv.append(Move("unit_sat", f"mlp{l}", l, {"l": l, "i": i}))
@@ -1039,6 +1266,14 @@ class GPTAdapter(Adapter):
                 for h2 in live:
                     if h != h2:
                         mv.append(Move("head_merge", f"L{l}h{h}", l, {"l": l, "h": h, "h2": h2}))
+            for h in live:
+                for g in range(self.H):
+                    if g == h:
+                        continue
+                    if self._alone(s, l, h, "k") and self.k_members(s, l, g):
+                        mv.append(Move("k_share", f"L{l}h{h}", l, {"l": l, "h": h, "g": g}))
+                    if self._alone(s, l, h, "v") and self.v_members(s, l, g):
+                        mv.append(Move("v_share", f"L{l}h{h}", l, {"l": l, "h": h, "g": g}))
         return mv
 
     @torch.no_grad()
@@ -1067,6 +1302,10 @@ class GPTAdapter(Adapter):
             return self._token_merge(s, p["c"], p["c2"])
         if m.kind == "head_merge":
             return self._head_merge(s, c, p["l"], p["h"], p["h2"])
+        if m.kind == "k_share":
+            return self._k_share(s, c, p["l"], p["h"], p["g"])
+        if m.kind == "v_share":
+            return self._v_share(s, c, p["l"], p["h"], p["g"])
         l = p["l"]
         if m.kind.startswith("unit_"):
             i = p["i"]
@@ -1076,7 +1315,8 @@ class GPTAdapter(Adapter):
                 self._kill_unit(s, l, i)
                 return True
             if m.kind == "unit_mean":
-                self._fold_unit(s, l, i, float(c["act"][l][..., i].mean()))
+                mean = p["mean"] if "mean" in p else c["act"][l][..., i].mean()
+                self._fold_unit(s, l, i, float(mean))
                 return True
             i2 = p["i2"]
             if int(st["unit_type"][l, i2]) != ACTIVE:
@@ -1099,7 +1339,8 @@ class GPTAdapter(Adapter):
             self._kill_head(s, l, h)
             return True
         if m.kind == "head_mean":
-            s.params["b_O"][l] += c["ho"][l][:, h].mean((0, 1))
+            mean = p["mean"] if "mean" in p else c["ho"][l][:, h].mean((0, 1))
+            s.params["b_O"][l] += mean
             self._kill_head(s, l, h)
             return True
         if m.kind == "head_mean_pos":
@@ -1125,9 +1366,13 @@ class GPTAdapter(Adapter):
         raise ValueError(m.kind)
 
 
-def load(L=2, seed=0, root=None, **kw):
-    """-> (adapter, Stage-1 state, base dict) for results_gpt/L<L>_seed<seed>."""
-    root = root or os.path.join(HERE, "results_gpt")
-    base = torch.load(os.path.join(root, f"L{L}_seed{seed}", "base_state.pt"), weights_only=False)
+def load(L=2, seed=0, root=None, device="cpu", **kw):
+    if root is None and (L, seed) == (2, 0):
+        path = os.path.join(os.path.dirname(HERE), "checkpoints", "gpt_l2_seed0.pt")
+    else:
+        path = os.path.join(root or os.path.join(HERE, "results_gpt"),
+                            f"L{L}_seed{seed}", "base_state.pt")
+    base = torch.load(path, map_location="cpu", weights_only=False)
     ad = GPTAdapter(make_data(seed), G.GPTConfig(**base["cfg"]), **kw)
-    return ad, ad.stage1(base["params"]), base
+    state = ad.stage1(base["params"])
+    return ad.to(device), state.to(device), base

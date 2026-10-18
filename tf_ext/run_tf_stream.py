@@ -1,10 +1,9 @@
 """
 Her round-4 transformer comparison with the stream-direction move added.
 
-Same base model, data split (valA chooses, valB stops), TF_BASE and FAIR_COMMON
-settings as nnprune.experiments.run_fair('transformer').  Arms:
-  S | valA                      her structural moves only (reproduction check against
-                                NNpruning/results/fair_transformer/paths.csv)
+Same base model and data split (valA chooses, valB stops) as the archived
+round-4 comparison. Arms:
+  S | valA                      classic structural moves only
   S+stream | valA               + stream_mean
   stream only | valA            stream_mean alone
   W+S+stream | valA | fdist     + single weights with the Fisher-distance proposer
@@ -23,7 +22,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "NNpruning"))
 from nnprune import transformer as T  # noqa: E402
 from nnprune.core import PruneConfig, prune_path  # noqa: E402
-from nnprune.experiments import FAIR_COMMON, TF_BASE, split_validation  # noqa: E402
+from nnprune.experiments import TF_BASE, split_validation  # noqa: E402
 from tf_stream import STREAM_KINDS, StreamAdapter  # noqa: E402
 
 torch.set_num_threads(int(os.environ.get("THREADS", "1")))
@@ -37,6 +36,8 @@ ARMS = {
     "W+S+stream | valA | fdist": dict(select_split="valA", weight_score="fdist",
                                       struct_kinds=HER_KINDS + STREAM_KINDS),
 }
+LEGACY_COMMON = dict(tie_break="k_eff", criterion="loss", stop_split="valB",
+                     select_admissibility=False)
 
 
 def fname(arm):
@@ -47,14 +48,15 @@ if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     data = split_validation(T.make_modadd_data(p=59, train_frac=0.5, seed=0), 0)
     ad = StreamAdapter(data, p=59, n_pool=int(os.environ.get("N_POOL", "4")))
-    s0 = ad.upgrade(torch.load(os.path.join(os.path.dirname(HERE), "NNpruning", "results", "transformer",
-                                            "base_state_seed0.pt"), weights_only=False))
+    s0 = ad.upgrade(torch.load(os.path.join(os.path.dirname(HERE), "checkpoints",
+                                            "modadd_seed0.pt"), weights_only=False))
     for arm in sys.argv[1:]:
         if os.path.exists(fname(arm)):
             print(f"SKIP {arm} (exists)", flush=True)
             continue
         t = time.time()
-        cfg = PruneConfig(**{**TF_BASE, **FAIR_COMMON, **ARMS[arm], "seed": 0, "verbose": True, "log_every": 25})
+        cfg = PruneConfig(**{**TF_BASE, **LEGACY_COMMON, **ARMS[arm],
+                             "seed": 0, "verbose": True, "log_every": 25})
         try:
             df, _ = prune_path(ad, s0, cfg, label=arm)
         except Exception as e:                      # noqa: BLE001

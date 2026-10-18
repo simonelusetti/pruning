@@ -57,6 +57,8 @@ READ = {"W_Q": 1, "W_K": 1, "W_V": 1, "W_in": 1, "W_U": 0}
 
 
 class StreamAdapter(T.TransformerAdapter):
+    move_groups = {**T.MOVE_GROUPS,
+                   "outdated": T.MOVE_GROUPS["outdated"] + STREAM_KINDS}
 
     def __init__(self, data, p, n_pool=4, n_each=2, fresh=False, **kw):
         """fresh=True: a stream candidate is a slot ('the i-th direction of the current

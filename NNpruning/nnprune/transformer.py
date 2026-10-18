@@ -22,6 +22,9 @@ MLP unit i (layer index 2)
 * unit_sat      b_i -> -inf: ReLU unit off (ReLU has no finite +inf saturation).
 * unit_mean     fan-in -> 0: unit = its mean activation, folded into b_out.
 * unit_merge    a_i ~= alpha a_i2 + beta, folded into unit i2 and b_out.
+* unit_fisher / head_fisher  delete one component after jointly refitting every
+                surviving outgoing map and the applicable bias in the downstream
+                Fisher metric.
 
 `query_positions` lists the positions whose outputs reach the loss.  With one
 layer and logits read at the last token only that position matters, so the
@@ -33,8 +36,27 @@ import math
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from .core import ACTIVE, REMOVED, Adapter, Move, State, zero_entries
+from .mlp import (grouped_fisher_compensation, grouped_fisher_pair_compensations,
+                  grouped_fisher_singleton_compensations,
+                  quantization_metadata, quantize_grouped_fisher_compensation,
+                  quantize_grouped_fisher_singleton_compensations,
+                  quantize_shortlisted_fisher_moves)
+
+CLASSIC_MOVES = ("head_off", "head_mean", "attn_uniform", "attn_fixed",
+                 "qk_rank", "ov_rank", "unit_sat", "unit_mean", "unit_merge")
+FISHER_MOVES = ("unit_fisher", "unit_fisher_pair", "head_fisher",
+                "head_fisher_pair", "qk_rank", "ov_rank")
+FISHER_QUANTIZED_MOVES = ("unit_fisher_quantized", "head_fisher_quantized",
+                          "qk_rank", "ov_rank")
+FISHER_QUANTIZED_POST_MOVES = ("unit_fisher_quantized_post",
+                               "head_fisher_quantized_post", "qk_rank", "ov_rank")
+EXTENSION_MOVES = ("unit_fisher_quantized", "head_fisher_quantized",
+                   "unit_fisher_quantized_post", "head_fisher_quantized_post")
+MOVE_GROUPS = {"classic": CLASSIC_MOVES, "outdated": (),
+               "extension": EXTENSION_MOVES, "fisher": FISHER_MOVES}
 
 
 # --------------------------------------------------------------------------
@@ -84,6 +106,7 @@ def weighted_lowrank(M, C_left, C_right, r, eps=1e-8):
 
 class TransformerAdapter(Adapter):
     loss_type = "categorical"
+    move_groups = MOVE_GROUPS
     prunable = ["W_E", "W_pos", "W_Q", "W_K", "W_V", "W_O", "W_in", "W_out", "W_U"]
     site_layer = {"W_E": 0, "W_pos": 0, "W_Q": 1, "W_K": 1, "W_V": 1, "W_O": 1,
                   "W_in": 2, "W_out": 2, "W_U": 3}
@@ -167,8 +190,9 @@ class TransformerAdapter(Adapter):
             zero_entries(s, name, m)
 
     def _kill_unit(self, s: State, i: int) -> None:
-        zero_entries(s, "W_in", torch.arange(self.d) + i * self.d)
-        zero_entries(s, "b_in", torch.tensor([i]))
+        device = s.params["W_in"].device
+        zero_entries(s, "W_in", torch.arange(self.d, device=device) + i * self.d)
+        zero_entries(s, "b_in", torch.tensor([i], device=device))
         col = torch.zeros_like(s.masks["W_out"])
         col[:, i] = True
         zero_entries(s, "W_out", col)
@@ -213,7 +237,7 @@ class TransformerAdapter(Adapter):
                 self._kill_unit(s, i); changed = True
             t = st["unit_type"]
             for i in ((t == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                b = s.params["b_in"][i] if bool(s.masks["b_in"][i]) else torch.tensor(0.0)
+                b = s.params["b_in"][i] if bool(s.masks["b_in"][i]) else s.params["b_in"].new_zeros(())
                 self._fold_unit(s, i, float(torch.relu(b))); changed = True
 
     def extra_k(self, s: State) -> int:
@@ -229,7 +253,9 @@ class TransformerAdapter(Adapter):
     @torch.no_grad()
     def refresh_extra(self, s: State, cfg) -> dict:
         X, _ = self.data["train"]
-        _, c = self.forward_full(self.effective(s), s.struct, X)
+        P = self.effective(s)
+        logits, c = self.forward_full(P, s.struct, X)
+        enabled = self.resolve_struct_kinds(cfg.struct_kinds)
         qp = self.qpos
         n = X.shape[0]
         xq = c["x0"][:, qp].reshape(-1, self.d).double()
@@ -251,14 +277,14 @@ class TransformerAdapter(Adapter):
         # merge pairs among active units
         pairs = []
         ids = (s.struct["unit_type"] == ACTIVE).nonzero().flatten()
-        if ids.numel() >= 2 and cfg.n_merge > 0:
+        if "unit_merge" in enabled and ids.numel() >= 2 and cfg.n_merge > 0:
             Aa = A[:, ids]
             Ac = Aa - Aa.mean(0)
             sd = Ac.pow(2).mean(0).sqrt()
             ok = sd > 1e-8
             C = (Ac.T @ Ac) / Aa.shape[0] / (sd[:, None] * sd[None, :]).clamp_min(1e-16)
             C = C * (ok[:, None] & ok[None, :])
-            iu = torch.triu_indices(len(ids), len(ids), 1)
+            iu = torch.triu_indices(len(ids), len(ids), 1, device=ids.device)
             vals = C[iu[0], iu[1]].abs()
             for t_ in torch.argsort(vals, descending=True)[: cfg.n_merge].tolist():
                 a_, b_ = int(iu[0, t_]), int(iu[1, t_])
@@ -267,11 +293,236 @@ class TransformerAdapter(Adapter):
                     beta = float(Aa[:, i].mean() - alpha * Aa[:, i2].mean())
                     pairs.append((int(ids[i]), int(ids[i2]), alpha, beta, float(vals[t_])))
         ctx["merge_pairs"] = pairs
+        ctx["fisher_moves"] = (self.fisher_deletion_moves(s, P, logits, c, cfg)
+                               if any(k in enabled for k in (
+                                   "unit_fisher", "unit_fisher_pair",
+                                   "head_fisher", "head_fisher_pair",
+                                   "unit_fisher_quantized", "head_fisher_quantized",
+                                   "unit_fisher_quantized_post",
+                                   "head_fisher_quantized_post"))
+                               else [])
         return ctx
+
+    @torch.no_grad()
+    def fisher_deletion_moves(self, s: State, P, logits, cache, cfg) -> list[Move]:
+        n = logits.shape[0]
+        if cfg.screen_n is not None and cfg.screen_n < n:
+            generator = torch.Generator(device=logits.device).manual_seed(cfg.seed + 7)
+            sample_idx = torch.randperm(n, generator=generator, device=logits.device)[:cfg.screen_n]
+            logits = logits[sample_idx]
+        else:
+            sample_idx = torch.arange(n, device=logits.device)
+
+        probabilities = torch.softmax(logits, -1)
+        generator = torch.Generator(device=logits.device).manual_seed(cfg.seed + 41)
+        labels = torch.multinomial(probabilities, cfg.n_mc, replacement=True,
+                                   generator=generator)
+        score = (torch.nn.functional.one_hot(labels, self.p).to(logits.dtype)
+                 - probabilities[:, None, :]).reshape(-1, self.p)
+        repeat = cfg.n_mc
+        g2 = score @ P["W_U"].T
+        weights = torch.ones(g2.shape[0], dtype=g2.dtype, device=g2.device)
+        act = cache["act"][sample_idx, -1].repeat_interleave(repeat, 0)
+        z = cache["z"][sample_idx, :, -1].repeat_interleave(repeat, 0)
+        moves = []
+        enabled = self.resolve_struct_kinds(cfg.struct_kinds)
+
+        if any(k in enabled for k in (
+                "unit_fisher", "unit_fisher_pair", "unit_fisher_quantized",
+                "unit_fisher_quantized_post")):
+            live = ((s.struct["unit_type"] == ACTIVE)
+                    & s.masks["W_out"].any(0)).nonzero().flatten()
+            if live.numel():
+                A = act[:, live]
+                outgoing = P["W_out"][:, live]
+                adjustable = s.masks["W_out"][:, live]
+                if "unit_fisher" in enabled:
+                    fits = grouped_fisher_singleton_compensations(
+                        A, weights, outgoing, downstream_jacobian=g2,
+                        adjustable_mask=adjustable)
+                    for global_i_tensor, fit in zip(live, fits):
+                        moves.append(Move(
+                            "unit_fisher", "mlp", 2,
+                            {"i": int(global_i_tensor),
+                             "survivor_ids": live[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher"},
+                            pred_cost=fit.predicted_cost))
+                if "unit_fisher_pair" in enabled:
+                    pair_fits = grouped_fisher_pair_compensations(
+                        A, weights, outgoing, downstream_jacobian=g2,
+                        adjustable_mask=adjustable,
+                        limit=cfg.n_struct * cfg.expand_on_fail)
+                    for pair, fit in pair_fits:
+                        global_pair = live[pair]
+                        moves.append(Move(
+                            "unit_fisher_pair", "mlp", 2,
+                            {"i": int(global_pair[0]), "j": int(global_pair[1]),
+                             "survivor_ids": live[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher"},
+                            pred_cost=fit.predicted_cost))
+                if "unit_fisher_quantized" in enabled:
+                    fits = grouped_fisher_singleton_compensations(
+                        A, weights, outgoing, downstream_jacobian=g2,
+                        adjustable_mask=adjustable)
+                    quantized_fits = quantize_grouped_fisher_singleton_compensations(
+                        fits, A, weights, outgoing, cfg.fisher_quant_gamma,
+                        downstream_jacobian=g2)
+                    for global_i_tensor, quantized in zip(live, quantized_fits):
+                        moves.append(Move(
+                            "unit_fisher_quantized", "mlp", 2,
+                            {"i": int(global_i_tensor),
+                             "survivor_ids": live[quantized.survivor_indices],
+                             "delta_out": quantized.delta_weights,
+                             "delta_bias": quantized.delta_bias,
+                             "gamma": cfg.fisher_quant_gamma,
+                             "fisher_cost": quantized.predicted_cost,
+                             "fisher_rank": quantized.rank,
+                             "fisher_rcond": quantized.rcond,
+                             "screen_cost": "fisher",
+                             **quantization_metadata(quantized)},
+                            pred_cost=quantized.predicted_cost))
+                if "unit_fisher_quantized_post" in enabled:
+                    fits = grouped_fisher_singleton_compensations(
+                        A, weights, outgoing, downstream_jacobian=g2,
+                        adjustable_mask=adjustable)
+                    context = {"activations": A, "fisher_weights": weights,
+                               "outgoing": outgoing, "jacobian": g2}
+                    for local_i, (global_i_tensor, fit) in enumerate(zip(live, fits)):
+                        moves.append(Move(
+                            "unit_fisher_quantized_post", "mlp", 2,
+                            {"i": int(global_i_tensor),
+                             "survivor_ids": live[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher",
+                             "_quant_context": context,
+                             "_quant_fit": fit,
+                             "_quant_remove": local_i,
+                             "_quant_singleton": True},
+                            pred_cost=fit.predicted_cost))
+
+        if any(k in enabled for k in (
+                "head_fisher", "head_fisher_pair", "head_fisher_quantized",
+                "head_fisher_quantized_post")):
+            local = (act > 0).to(act.dtype) * (s.struct["unit_type"] == ACTIVE)
+            g1 = g2 + ((g2 @ P["W_out"]) * local) @ P["W_in"]
+            live_dims = ((s.struct["head_alive"][:, None]
+                         & s.masks["W_V"].any(1)
+                         & s.masks["W_O"].any(2)).reshape(-1).nonzero().flatten())
+            if live_dims.numel():
+                A = z.reshape(z.shape[0], -1)[:, live_dims]
+                outgoing = P["W_O"].reshape(-1, self.d).T[:, live_dims]
+                adjustable = s.masks["W_O"].reshape(-1, self.d).T[:, live_dims]
+                heads = s.struct["head_alive"].nonzero().flatten()
+                if "head_fisher" in enabled:
+                    for h in heads.tolist():
+                        remove = ((live_dims // self.dh) == h).nonzero().flatten()
+                        if remove.numel() == 0:
+                            continue
+                        fit = grouped_fisher_compensation(
+                            A, weights, outgoing, remove, downstream_jacobian=g1,
+                            adjustable_mask=adjustable)
+                        moves.append(Move(
+                            "head_fisher", f"head{h}", 1,
+                            {"h": h, "survivor_dims": live_dims[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher"},
+                            pred_cost=fit.predicted_cost))
+                if "head_fisher_pair" in enabled and heads.numel() >= 2:
+                    for pair in torch.combinations(heads, 2):
+                        remove = (((live_dims // self.dh) == pair[0])
+                                  | ((live_dims // self.dh) == pair[1])).nonzero().flatten()
+                        fit = grouped_fisher_compensation(
+                            A, weights, outgoing, remove, downstream_jacobian=g1,
+                            adjustable_mask=adjustable)
+                        moves.append(Move(
+                            "head_fisher_pair", f"heads{int(pair[0])}+{int(pair[1])}", 1,
+                            {"h": int(pair[0]), "j": int(pair[1]),
+                             "survivor_dims": live_dims[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher"},
+                            pred_cost=fit.predicted_cost))
+                if "head_fisher_quantized" in enabled:
+                    group_ids = live_dims // self.dh
+                    for h in heads.tolist():
+                        remove = (group_ids == h).nonzero().flatten()
+                        if remove.numel() == 0:
+                            continue
+                        fit = grouped_fisher_compensation(
+                            A, weights, outgoing, remove, downstream_jacobian=g1,
+                            adjustable_mask=adjustable)
+                        quantized = quantize_grouped_fisher_compensation(
+                            fit, A, weights, outgoing, remove,
+                            cfg.fisher_quant_gamma, downstream_jacobian=g1,
+                            group_ids=group_ids)
+                        moves.append(Move(
+                            "head_fisher_quantized", f"head{h}", 1,
+                            {"h": h,
+                             "survivor_dims": live_dims[quantized.survivor_indices],
+                             "delta_out": quantized.delta_weights,
+                             "delta_bias": quantized.delta_bias,
+                             "gamma": cfg.fisher_quant_gamma,
+                             "fisher_cost": quantized.predicted_cost,
+                             "fisher_rank": quantized.rank,
+                             "fisher_rcond": quantized.rcond,
+                             "screen_cost": "fisher",
+                             **quantization_metadata(quantized)},
+                            pred_cost=quantized.predicted_cost))
+                if "head_fisher_quantized_post" in enabled:
+                    group_ids = live_dims // self.dh
+                    context = {"activations": A, "fisher_weights": weights,
+                               "outgoing": outgoing, "jacobian": g1}
+                    for h in heads.tolist():
+                        remove = (group_ids == h).nonzero().flatten()
+                        if remove.numel() == 0:
+                            continue
+                        fit = grouped_fisher_compensation(
+                            A, weights, outgoing, remove, downstream_jacobian=g1,
+                            adjustable_mask=adjustable)
+                        moves.append(Move(
+                            "head_fisher_quantized_post", f"head{h}", 1,
+                            {"h": h,
+                             "survivor_dims": live_dims[fit.survivor_indices],
+                             "delta_out": fit.delta_weights,
+                             "delta_bias": fit.delta_bias,
+                             "fisher_cost": fit.predicted_cost,
+                             "fisher_rank": fit.rank,
+                             "fisher_rcond": fit.rcond,
+                             "screen_cost": "fisher",
+                             "_quant_context": context,
+                             "_quant_fit": fit,
+                             "_quant_remove": remove,
+                             "_quant_group_ids": group_ids},
+                            pred_cost=fit.predicted_cost))
+        return moves
+
+    def prepare_structural_candidates(self, s: State, moves: list, cfg) -> list:
+        return quantize_shortlisted_fisher_moves(moves, cfg.fisher_quant_gamma)
 
     def structural_moves(self, s: State, ctx: dict, cfg) -> list:
         st = s.struct
-        mv = []
+        mv = list(ctx.get("fisher_moves", []))
         for h in range(self.H):
             if not bool(st["head_alive"][h]):
                 continue
@@ -299,6 +550,19 @@ class TransformerAdapter(Adapter):
             i = p["i"]
             if int(t[i]) != ACTIVE:
                 return False
+            if m.kind in ("unit_fisher", "unit_fisher_pair", "unit_fisher_quantized",
+                          "unit_fisher_quantized_post"):
+                removed = [i, p["j"]] if m.kind == "unit_fisher_pair" else [i]
+                if any(int(t[j]) != ACTIVE for j in removed):
+                    return False
+                survivor_ids = p["survivor_ids"]
+                if survivor_ids.numel() and not bool((t[survivor_ids] == ACTIVE).all()):
+                    return False
+                s.params["W_out"][:, survivor_ids] += p["delta_out"].to(s.params["W_out"].dtype)
+                s.params["b_out"] += p["delta_bias"].to(s.params["b_out"].dtype)
+                for j in removed:
+                    self._kill_unit(s, j)
+                return True
             if m.kind in ("unit_sat", "unit_mean"):
                 self._fold_unit(s, i, p["c"])
                 return True
@@ -316,6 +580,19 @@ class TransformerAdapter(Adapter):
         h = p["h"]
         if not bool(st["head_alive"][h]):
             return False
+        if m.kind in ("head_fisher", "head_fisher_pair", "head_fisher_quantized",
+                      "head_fisher_quantized_post"):
+            removed = [h, p["j"]] if m.kind == "head_fisher_pair" else [h]
+            if any(not bool(st["head_alive"][j]) for j in removed):
+                return False
+            survivor_dims = p["survivor_dims"]
+            flat = s.params["W_O"].view(-1, self.d)
+            flat[survivor_dims] += p["delta_out"].to(flat.dtype).T
+            s.params["B_attn"][-1] += p["delta_bias"].to(s.params["B_attn"].dtype)
+            s.masks["B_attn"][-1] = True
+            for j in removed:
+                self._kill_head(s, j)
+            return True
         if m.kind == "head_off":
             self._kill_head(s, h)
             return True
@@ -349,7 +626,7 @@ class TransformerAdapter(Adapter):
                 return False
             Wv = s.params["W_V"][h] * s.masks["W_V"][h]
             Wo = s.params["W_O"][h] * s.masks["W_O"][h]
-            A, B = weighted_lowrank(Wv @ Wo, p["Cy"], torch.eye(self.d), r)
+            A, B = weighted_lowrank(Wv @ Wo, p["Cy"], torch.eye(self.d, device=Wv.device), r)
             self._set_factors(s, "W_V", "W_O", h, A, B, r, transpose_second=True)
             return True
         raise ValueError(m.kind)
@@ -404,7 +681,7 @@ class TransformerAdapter(Adapter):
         x2n = c["x2"][:, -1].pow(2).sum(0).sqrt()
         return {
             "W_E": counts.sqrt()[:, None],
-            "W_pos": torch.full((self.T, 1), math.sqrt(n)),
+            "W_pos": torch.full((self.T, 1), math.sqrt(n), device=X.device),
             "W_Q": x0n[None, :, None], "W_K": x0n[None, :, None], "W_V": x0n[None, :, None],
             "W_O": zn[:, :, None],
             "W_in": x1n[None, :], "W_out": an[None, :], "W_U": x2n[:, None],
@@ -416,27 +693,33 @@ class TransformerAdapter(Adapter):
 # --------------------------------------------------------------------------
 
 def train_transformer(adapter: TransformerAdapter, steps=8000, lr=1e-3, wd=1.0, seed=0,
-                      log_every=500, stop_val_acc=None, verbose=True):
+                      log_every=500, stop_val_acc=None, verbose=True, batch_size=None):
     torch.manual_seed(seed)
-    P = {k: v.requires_grad_(True) for k, v in adapter.init_params(seed).items()}
-    trainable = [v for k, v in P.items() if k != "B_attn"]
-    s = adapter.make_state(P)
     X, y = adapter.data["train"]
+    P = {k: v.to(X.device).requires_grad_(True) for k, v in adapter.init_params(seed).items()}
+    trainable = [v for k, v in P.items() if k != "B_attn"]
+    s = adapter.make_state(P).to(X.device)
+    loader = DataLoader(TensorDataset(X, y), batch_size=batch_size or len(X),
+                        shuffle=batch_size is not None)
     opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=wd, betas=(0.9, 0.98))
     hist = []
     eff_mask = {k: s.masks[k].float() for k in P}
     for it in range(steps):
-        opt.zero_grad()
-        Pe = {k: P[k] * eff_mask[k] for k in P}
-        loss = adapter.loss_from_logits(adapter.logits(Pe, s.struct, X), y).mean()
-        loss.backward()
-        opt.step()
+        total = torch.zeros((), device=X.device)
+        for xb, yb in loader:
+            opt.zero_grad(set_to_none=True)
+            Pe = {k: P[k] * eff_mask[k] for k in P}
+            loss = adapter.loss_from_logits(adapter.logits(Pe, s.struct, xb), yb).mean()
+            loss.backward()
+            opt.step()
+            total += loss.detach() * len(xb)
+        train_loss = float(total / len(X))
         if it % log_every == 0 or it == steps - 1:
-            st = adapter.make_state(P)
+            st = adapter.make_state(P).to(X.device)
             va = adapter.metrics(st, "val")
-            hist.append({"step": it, "train_loss": loss.item(), "val_loss": va["loss"], "val_acc": va["acc"]})
+            hist.append({"step": it, "train_loss": train_loss, "val_loss": va["loss"], "val_acc": va["acc"]})
             if verbose:
-                print(f"step {it:6d}  train {loss.item():.4f}  val {va['loss']:.4f}  val_acc {va['acc']:.3f}")
+                print(f"step {it:6d}  train {train_loss:.4f}  val {va['loss']:.4f}  val_acc {va['acc']:.3f}")
             if stop_val_acc is not None and va["acc"] >= stop_val_acc and it > 0:
                 break
-    return adapter.make_state(P), hist
+    return adapter.make_state(P).to(X.device), hist

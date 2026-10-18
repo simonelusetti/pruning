@@ -160,7 +160,7 @@ with their own Fisher code (vendored verbatim from `edhirst/Fdist_Pruning`) and
 their protocol: model Fisher on a 500-point training subset, $K=3$, global
 unstructured pruning, no retraining. Evaluation is identical to the other
 baselines: the anchored 2σ test on validation, and $k_{\rm eff}$ after cascades.
-`tests/test_fdist.py` checks that our runs zero exactly the entries their
+The adapter was checked to zero exactly the entries their
 pruner classes zero.""")
 
 code(r"""fdm = E.run_fdist("mlp", recompute=RECOMPUTE)

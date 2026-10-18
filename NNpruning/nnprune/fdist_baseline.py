@@ -5,8 +5,7 @@ Paper: "Optimal Pruning for Neural Architectures using Fisher Information
 Distances", arXiv:2609.16129.  Code: https://github.com/edhirst/Fdist_Pruning.
 The Fisher routines are their code, vendored verbatim in third_party/fdist_fim.py.
 The score formulas and the pruning protocol below mirror their pruners
-(src/pruning/f_dist_*.py) line by line; tests/test_fdist.py checks this
-against their own pruner classes when their repository is available.
+(src/pruning/f_dist_*.py) line by line and were checked against their pruner classes.
 
 Schemes (their names):
   fdist_one_shot   s_k = sqrt(F_kk(theta*)) |theta_k|; every sparsity level is
@@ -45,6 +44,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from .core import Adapter, PruneConfig, State, _anchored_columns, _row, _within_tolerance, zero_entries
 from .third_party.fdist_fim import calculate_fim_backprop, fisher_entries_forward
@@ -61,6 +61,7 @@ class AdapterModule(nn.Module):
         super().__init__()
         self._adapter = adapter
         self._struct = state.struct
+        self._sequence = bool(getattr(adapter, "fdist_sequence", False))
         eff = adapter.effective(state)
         self._fixed = {k: v.detach() for k, v in eff.items() if k in exclude}
         self._names = [k for k in eff if k not in exclude]
@@ -68,10 +69,16 @@ class AdapterModule(nn.Module):
             self.register_parameter(k, nn.Parameter(eff[k].detach().clone()))
 
     def forward(self, x):
+        if self._sequence:
+            # The external code expects one categorical prediction per input.
+            # Sequence adapters append the selected position to each window.
+            pos, x = x[:, -1].long(), x[:, :-1]
         P = dict(self._fixed)
         for k in self._names:
             P[k] = getattr(self, k)
         z = self._adapter.logits(P, self._struct, x)
+        if self._sequence:
+            z = z[torch.arange(len(z), device=z.device), pos]
         if self._adapter.loss_type == "bernoulli":
             z = torch.stack([torch.zeros_like(z), z], -1)
         return z
@@ -79,10 +86,19 @@ class AdapterModule(nn.Module):
 
 def fisher_loader(adapter: Adapter, subset_size=500, seed=42, batch_size=128):
     X, y = adapter.data["train"]
-    g = torch.Generator().manual_seed(seed)
-    idx = torch.randperm(X.shape[0], generator=g)[:subset_size]
-    Xs, ys = X[idx], y[idx]
-    return [(Xs[i:i + batch_size], ys[i:i + batch_size]) for i in range(0, Xs.shape[0], batch_size)]
+    g = torch.Generator(device=X.device).manual_seed(seed)
+    if bool(getattr(adapter, "fdist_sequence", False)):
+        # Sample token predictions, then encode the selected position in an
+        # extra input column decoded by AdapterModule.forward.
+        T = X.shape[1]
+        idx = torch.randperm(X.shape[0] * T, generator=g, device=X.device)[:subset_size]
+        wi, pos = torch.div(idx, T, rounding_mode="floor"), idx % T
+        Xs = torch.cat([X[wi], pos[:, None].to(X.dtype)], 1)
+        ys = y[wi, pos]
+    else:
+        idx = torch.randperm(X.shape[0], generator=g, device=X.device)[:subset_size]
+        Xs, ys = X[idx], y[idx]
+    return DataLoader(TensorDataset(Xs, ys), batch_size=batch_size, shuffle=False)
 
 
 def _fisher_dict(module: AdapterModule, loader) -> dict:
@@ -166,7 +182,7 @@ def _prune_lowest(state: State, scores: dict, names: list, k: int) -> int:
 
 def fdist_path(adapter: Adapter, state0: State, scheme: str, cfg: PruneConfig, fracs=None,
                exclude=(), K: int = 3, subset_size=500, subset_seed=42,
-               probe_batch=32, verbose=False) -> pd.DataFrame:
+               probe_batch=32, verbose=False, active_total=False) -> pd.DataFrame:
     """Their scheme on a sparsity grid, evaluated like every other baseline.
     `fracs` are fractions of ALL trained parameters (their ratio semantics)."""
     if scheme not in SCHEMES:
@@ -175,7 +191,12 @@ def fdist_path(adapter: Adapter, state0: State, scheme: str, cfg: PruneConfig, f
         fracs = np.round(np.concatenate([np.arange(0, 0.5, 0.02), np.arange(0.5, 0.99, 0.01)]), 4)
     loader = fisher_loader(adapter, subset_size, subset_seed)
     names = _eligible(adapter, state0, exclude)
-    total = sum(int(state0.params[k].numel()) for k in state0.params if k != "B_attn")
+    # The original adapters store only trained tensors, all initially active, so
+    # Berman et al.'s sparsity denominator is their raw size.  Extension adapters
+    # may also reserve masked factor/fold tensors.  For those states the equivalent
+    # denominator is the number of initially active eligible entries.
+    total = (sum(int(state0.masks[k].sum()) for k in names) if active_total else
+             sum(int(state0.params[k].numel()) for k in state0.params if k != "B_attn"))
     ref = {c: adapter.per_sample(state0, cfg.stop, c) for c in ("loss", "error")}
     k0 = adapter.k_eff(state0)
     rows, t0 = [], time.time()
