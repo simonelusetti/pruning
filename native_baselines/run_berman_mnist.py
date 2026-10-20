@@ -27,6 +27,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "NNpruning"))
+from nnprune.canonicalize.mlp import (canonicalize_linear_chain,
+                                      canonicalize_mlp_tensors)
 from nnprune.third_party.fdist_fim import calculate_fim_backprop
 
 DATA = ROOT / "native_baselines" / "cache" / "berman" / "mnist"
@@ -607,26 +609,16 @@ def fisher_general_candidates(net, A, G, args):
     def closure(deleted):
         deleted = tuple(sorted(set(deleted)))
         if deleted not in closure_cache:
-            masks = [value.clone() for value in live.split(sizes)]
-            masks = [value.reshape_as(matrix) for value, matrix in zip(masks, matrices)]
+            values = [matrix.clone() for matrix in matrices]
             ids = torch.tensor(deleted, device=theta.device)
             for layer, (start, stop) in enumerate(zip(offsets, offsets[1:])):
                 local = ids[(ids >= start) & (ids < stop)] - start
                 if local.numel():
-                    masks[layer].view(-1)[local] = False
-            while True:
-                before = sum(int(mask.sum()) for mask in masks)
-                for layer in (0, 1):
-                    incoming, outgoing = masks[layer], masks[layer + 1]
-                    dead = ~outgoing[:, :-1].any(0)
-                    incoming[dead] = False
-                    outgoing[:, dead.nonzero().flatten()] = False
-                    constant = ~incoming[:, :-1].any(1) & outgoing[:, :-1].any(0)
-                    incoming[constant] = False
-                    outgoing[:, constant.nonzero().flatten()] = False
-                if sum(int(mask.sum()) for mask in masks) == before:
-                    break
-            survivor = torch.cat([mask.flatten() for mask in masks])
+                    values[layer].view(-1)[local] = 0
+            canonicalize_mlp_tensors(
+                [value[:, :-1] for value in values],
+                [value[:, -1] for value in values], (F.relu, F.relu))
+            survivor = torch.cat([(value != 0).flatten() for value in values])
             closure_cache[deleted] = survivor, int(live.sum() - survivor.sum())
         return closure_cache[deleted]
 
@@ -837,21 +829,7 @@ def unit_move(kind, layer, i, target=-1, alpha=0., c=0.):
 
 @torch.inference_mode()
 def canonicalize(net):
-    """Function-preserving cleanup: a unit with no live fan-out loses its fan-in and bias;
-    a unit with no live fan-in is the constant relu(b), folded into the next bias."""
-    while True:
-        before = nonzero(net)
-        for layer in (0, 1):
-            incoming, outgoing = linears(net)[layer], linears(net)[layer + 1]
-            dead = (outgoing.weight == 0).all(0)
-            incoming.weight[dead] = 0
-            incoming.bias[dead] = 0
-            constant = (incoming.weight == 0).all(1)
-            outgoing.bias.add_(outgoing.weight[:, constant] @ incoming.bias[constant].relu())
-            outgoing.weight[:, constant] = 0
-            incoming.bias[constant] = 0
-        if nonzero(net) == before:
-            return
+    canonicalize_linear_chain(linears(net), (F.relu, F.relu))
 
 
 def snapshot(net):

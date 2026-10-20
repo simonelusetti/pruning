@@ -38,6 +38,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from .canonicalize.mlp import HiddenLayer, canonicalize_mlp
 from .core import ACTIVE, REMOVED, Adapter, Move, State, zero_entries
 from .mlp import (grouped_fisher_compensation, grouped_fisher_pair_compensations,
                   grouped_fisher_singleton_compensations,
@@ -226,19 +227,27 @@ class TransformerAdapter(Adapter):
                 self._kill_head(s, h)
             elif bool(st["head_fixed"][h]) and bool(qk.any()):
                 self._zero_qk(s, h)
-        # MLP units
-        changed = True
-        while changed:
-            changed = False
-            t = st["unit_type"]
-            fan_out = s.masks["W_out"].any(0)
-            fan_in = s.masks["W_in"].any(1)
-            for i in ((t == ACTIVE) & ~fan_out).nonzero().flatten().tolist():
-                self._kill_unit(s, i); changed = True
-            t = st["unit_type"]
-            for i in ((t == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                b = s.params["b_in"][i] if bool(s.masks["b_in"][i]) else s.params["b_in"].new_zeros(())
-                self._fold_unit(s, i, float(torch.relu(b))); changed = True
+        self._unit_canonicalize(s)
+
+    def _unit_canonicalize(self, s: State) -> None:
+        def remove(ids):
+            for i in ids.tolist():
+                self._kill_unit(s, i)
+
+        def fold(ids):
+            for i in ids.tolist():
+                b = (s.params["b_in"][i] if bool(s.masks["b_in"][i])
+                     else s.params["b_in"].new_zeros(()))
+                self._fold_unit(s, i, float(torch.relu(b)))
+
+        canonicalize_mlp((HiddenLayer(
+            live=lambda: s.struct["unit_type"] == ACTIVE,
+            constant=lambda: s.struct["unit_type"] == ACTIVE,
+            fan_in=lambda: s.masks["W_in"].any(1),
+            fan_out=lambda: s.masks["W_out"].any(0),
+            remove=remove,
+            fold=fold,
+        ),))
 
     def extra_k(self, s: State) -> int:
         return int(s.struct["head_fixed"].sum()) * (self.T * (self.T - 1) // 2)

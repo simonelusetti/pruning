@@ -223,21 +223,6 @@ class StreamAdapter(T.TransformerAdapter):
         self._head_canonicalize(s)
         self._unit_canonicalize(s)
 
-    def _unit_canonicalize(self, s):
-        """Her MLP-unit cascade (transformer.py canonicalize, second half), unchanged."""
-        changed = True
-        while changed:
-            changed = False
-            t = s.struct["unit_type"]
-            fan_out = s.masks["W_out"].any(0)
-            fan_in = s.masks["W_in"].any(1)
-            for i in ((t == T.ACTIVE) & ~fan_out).nonzero().flatten().tolist():
-                self._kill_unit(s, i); changed = True
-            t = s.struct["unit_type"]
-            for i in ((t == T.ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                b = s.params["b_in"][i] if bool(s.masks["b_in"][i]) else torch.tensor(0.0)
-                self._fold_unit(s, i, float(torch.relu(b))); changed = True
-
     # ---- head bookkeeping with the q/k/v biases ------------------------------------------------
     def _kill_head(self, s, h):
         super()._kill_head(s, h)

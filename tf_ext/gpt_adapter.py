@@ -111,6 +111,7 @@ import torch.nn.functional as F
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "NNpruning"))
+from nnprune.canonicalize.mlp import HiddenLayer, canonicalize_mlp  # noqa: E402
 from nnprune.core import ACTIVE, REMOVED, Adapter, Move, State, zero_entries  # noqa: E402
 from nnprune.transformer import weighted_lowrank  # noqa: E402
 import gpt_toy as G  # noqa: E402
@@ -607,17 +608,27 @@ class GPTAdapter(Adapter):
         return changed
 
     def _f_units(self, s):
-        changed = False
+        layers = []
         for l in range(self.L):
-            t = s.struct["unit_type"][l]
-            fan_out = s.masks["W_2"][l].any(0)
-            for i in ((t == ACTIVE) & ~fan_out).nonzero().flatten().tolist():
-                self._kill_unit(s, l, i); changed = True
-            fan_in = s.masks["W_1"][l].any(1) | s.masks["p1"][l]
-            for i in ((s.struct["unit_type"][l] == ACTIVE) & ~fan_in).nonzero().flatten().tolist():
-                b = s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i]) else s.params["b_1"].new_zeros(())
-                self._fold_unit(s, l, i, float(F.gelu(b))); changed = True
-        return changed
+            def remove(ids, l=l):
+                for i in ids.tolist():
+                    self._kill_unit(s, l, i)
+
+            def fold(ids, l=l):
+                for i in ids.tolist():
+                    b = (s.params["b_1"][l, i] if bool(s.masks["b_1"][l, i])
+                         else s.params["b_1"].new_zeros(()))
+                    self._fold_unit(s, l, i, float(F.gelu(b)))
+
+            layers.append(HiddenLayer(
+                live=lambda l=l: s.struct["unit_type"][l] == ACTIVE,
+                constant=lambda l=l: s.struct["unit_type"][l] == ACTIVE,
+                fan_in=lambda l=l: s.masks["W_1"][l].any(1) | s.masks["p1"][l],
+                fan_out=lambda l=l: s.masks["W_2"][l].any(0),
+                remove=remove,
+                fold=fold,
+            ))
+        return canonicalize_mlp(layers)
 
     def _f_writer_columns(self, s):
         reads_after = [None] * (self.n_sites + 1)

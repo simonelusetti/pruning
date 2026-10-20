@@ -32,6 +32,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "NNpruning"))
+from nnprune.canonicalize.mlp import canonicalize_linear_chain
 from nnprune.mlp import (grouped_fisher_compensation,
                          grouped_fisher_pair_compensations,
                          quantization_metadata,
@@ -105,6 +106,68 @@ def per_sequence_loss(model, sequences: list[torch.Tensor]) -> torch.Tensor:
         logits.reshape(-1, logits.shape[-1]), labels.reshape(-1),
         reduction="none").reshape(ids.shape[0], -1).mean(1)
     return losses.cpu()
+
+
+class CachedCandidateLoss:
+    @torch.inference_mode()
+    def __init__(self, model, sequences):
+        self.model = model
+        self.ids = torch.cat(sequences, 0).to(next(model.parameters()).device)
+        decoder = model.model.decoder
+        count = len(decoder.layers)
+        self.layer_inputs = [None] * count
+        self.layer_kwargs = [None] * count
+        self.mlp_residuals = [None] * count
+        handles = []
+
+        for index, layer in enumerate(decoder.layers):
+            def capture_layer(_module, args, kwargs, i=index):
+                self.layer_inputs[i] = args[0].detach()
+                self.layer_kwargs[i] = dict(kwargs)
+
+            handles.append(layer.register_forward_pre_hook(capture_layer, with_kwargs=True))
+            if layer.do_layer_norm_before:
+                def capture_mlp(_module, args, i=index):
+                    self.mlp_residuals[i] = args[0].detach()
+
+                handles.append(layer.final_layer_norm.register_forward_pre_hook(capture_mlp))
+        try:
+            decoder(input_ids=self.ids, use_cache=False, return_dict=True)
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    @torch.inference_mode()
+    def _finish(self, hidden, first_layer):
+        decoder = self.model.model.decoder
+        for index in range(first_layer, len(decoder.layers)):
+            hidden = decoder.layers[index](hidden, **self.layer_kwargs[index])[0]
+        if decoder.final_layer_norm is not None:
+            hidden = decoder.final_layer_norm(hidden)
+        if decoder.project_out is not None:
+            hidden = decoder.project_out(hidden)
+        logits = self.model.lm_head(hidden).contiguous()[:, :-1].float()
+        labels = self.ids[:, 1:]
+        return F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]), labels.reshape(-1),
+            reduction="none").reshape(self.ids.shape[0], -1).mean(1).cpu()
+
+    @torch.inference_mode()
+    def loss(self, candidate):
+        layer = self.model.model.decoder.layers[candidate.layer]
+        mlp_only = (candidate.kind.startswith("unit_")
+                    or (candidate.kind == "weight_zero"
+                        and candidate.payload["module"] in {"fc1", "fc2"}))
+        residual = self.mlp_residuals[candidate.layer]
+        if mlp_only and residual is not None:
+            shape = self.layer_inputs[candidate.layer].shape
+            hidden = layer.final_layer_norm(residual)
+            hidden = layer.fc1(hidden)
+            hidden = layer.activation_fn(hidden)
+            hidden = layer.fc2(hidden)
+            hidden = (residual + hidden).view(shape)
+            return self._finish(hidden, candidate.layer + 1)
+        return self._finish(self.layer_inputs[candidate.layer], candidate.layer)
 
 
 def paired(mean_candidate: torch.Tensor, reference: torch.Tensor):
@@ -312,8 +375,20 @@ def _top_family(candidates, kind, count):
     return sorted(items, key=lambda c: c.proxy)[:count]
 
 
+def select_proposals(candidates, kinds, count):
+    kinds = set(kinds)
+    selected = []
+    for kind in ("unit_fisher", "unit_fisher_pair", "head_fisher", "head_fisher_pair",
+                 "unit_fisher_quantized", "head_fisher_quantized",
+                 "unit_mean", "unit_off", "unit_merge", "head_mean", "head_off",
+                 "attn_uniform", "qk_rank", "ov_rank", "weight_zero"):
+        if kind in kinds:
+            selected.extend(_top_family(candidates, kind, count))
+    return selected
+
+
 @torch.inference_mode()
-def propose(model, stats, args, kinds=ALL_MOVES, fisher_stats=None):
+def propose(model, stats, args, kinds=ALL_MOVES, fisher_stats=None, layer_indices=None):
     kinds = set(kinds)
     classic_units = bool(kinds & {"unit_mean", "unit_off", "unit_merge"})
     classic_heads = bool(kinds & {"head_mean", "head_off", "attn_uniform",
@@ -322,7 +397,10 @@ def propose(model, stats, args, kinds=ALL_MOVES, fisher_stats=None):
     d = model.config.hidden_size
     H = model.config.num_attention_heads
     width = d // H
-    for li, layer in enumerate(model.model.decoder.layers):
+    indices = (range(len(model.model.decoder.layers))
+               if layer_indices is None else layer_indices)
+    for li in indices:
+        layer = model.model.decoder.layers[li]
         stat = stats[li]
         acts, attended = stat.mlp_sample, stat.attn_sample
         alive_u = live_units(layer)
@@ -591,18 +669,11 @@ def propose(model, stats, args, kinds=ALL_MOVES, fisher_stats=None):
                                                 {"module": name, "indices": chosen,
                                                  "label": f"{name}.n{size}"}))
 
-    selected = []
-    for kind in ("unit_fisher", "unit_fisher_pair", "head_fisher", "head_fisher_pair",
-                 "unit_fisher_quantized", "head_fisher_quantized",
-                 "unit_mean", "unit_off", "unit_merge", "head_mean", "head_off",
-                 "attn_uniform", "qk_rank", "ov_rank", "weight_zero"):
-        if kind in kinds:
-            selected.extend(_top_family(all_candidates, kind, args.per_family))
-    return selected
+    return select_proposals(all_candidates, kinds, args.per_family)
 
 
 @torch.inference_mode()
-def apply_candidate(model, candidate: Candidate):
+def _apply_candidate(model, candidate: Candidate):
     layer = model.model.decoder.layers[candidate.layer]
     p = candidate.payload
     if candidate.kind in ("unit_fisher", "unit_fisher_pair", "unit_fisher_quantized"):
@@ -698,6 +769,13 @@ def apply_candidate(model, candidate: Candidate):
         return
     module = dict(linear_layers(layer))[p["module"]]
     module.weight.flatten()[p["indices"]] = 0
+
+
+@torch.inference_mode()
+def apply_candidate(model, candidate: Candidate):
+    _apply_candidate(model, candidate)
+    layer = model.model.decoder.layers[candidate.layer]
+    canonicalize_linear_chain((layer.fc1, layer.fc2), (layer.activation_fn,))
 
 
 def parse_args():
@@ -855,7 +933,8 @@ def main():
               "fisher_single": FISHER_SINGLE_MOVES,
               "fisher": FISHER_MOVES, "fisher_quantized": FISHER_QUANTIZED_MOVES,
               "all": ALL_MOVES + FISHER_MOVES}[args.move_group])
-    stats, fstats = None, None
+    stats, fstats, proposal_cache = None, None, None
+    dirty_layer = None
     completed_targets = set(rows[-1].get("matched_baselines", []))
     stopped = any(not row.get("admissible", True) for row in rows)
     stop_index = next((i - 1 for i, row in enumerate(rows)
@@ -879,15 +958,34 @@ def main():
                 model, calibration[:args.fisher_sequences], args.fisher_tokens,
                 args.fisher_mc, args.seed + step)
                 if any(kind in kinds for kind in FISHER_ALL_MOVES) else None)
-        candidates = propose(model, stats, args, kinds, fstats)
+            proposal_cache = None
+            dirty_layer = None
+        if fstats is None:
+            if proposal_cache is None:
+                proposal_cache = {
+                    layer: propose(model, stats, args, kinds, layer_indices=(layer,))
+                    for layer in range(len(model.model.decoder.layers))
+                }
+            elif dirty_layer is not None:
+                proposal_cache[dirty_layer] = propose(
+                    model, stats, args, kinds, layer_indices=(dirty_layer,))
+                dirty_layer = None
+            candidates = select_proposals(
+                [candidate for layer in range(len(model.model.decoder.layers))
+                 for candidate in proposal_cache[layer]], kinds, args.per_family)
+        else:
+            candidates = propose(model, stats, args, kinds, fstats)
         evaluated = []
+        snapshots = {}
+        loss_cache = CachedCandidateLoss(model, val_a)
         for candidate in candidates:
             layer = model.model.decoder.layers[candidate.layer]
-            snapshot = snapshot_layer(layer)
+            if candidate.layer not in snapshots:
+                snapshots[candidate.layer] = snapshot_layer(layer)
             apply_candidate(model, candidate)
-            loss = per_sequence_loss(model, val_a)
+            loss = loss_cache.loss(candidate)
             evaluated.append((candidate, loss))
-            restore_layer(layer, snapshot)
+            restore_layer(layer, snapshots[candidate.layer])
         if not evaluated:
             termination_reason = "no_candidates"
             break
@@ -948,9 +1046,12 @@ def main():
         print(f"step {step}: {chosen.label}, removed {100 * removed / prunable_total:.3f}%, "
               f"valB dL={delta:.4g}, {row['seconds']:.0f}s", flush=True)
         if any(kind in kinds for kind in FISHER_ALL_MOVES):
-            stats, fstats = None, None
+            stats, fstats, proposal_cache = None, None, None
         elif step % args.refresh_every == 0:
             stats = None
+            proposal_cache = None
+        else:
+            dirty_layer = chosen.layer
         if not args.no_model_save and step % args.save_every == 0:
             tmp = args.model_checkpoint.with_suffix(args.model_checkpoint.suffix + ".tmp")
             torch.save({"model": model.state_dict(), "rows": rows,

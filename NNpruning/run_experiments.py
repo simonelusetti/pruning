@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--fisher-general-starts", type=int, default=2)
     parser.add_argument("--fisher-general-iters", type=int, default=4)
     parser.add_argument("--fisher-general-update-pool", type=int, default=4)
+    parser.add_argument("--fisher-t-rank", type=int, default=4)
+    parser.add_argument("--fisher-t-lambda-m", type=float, default=1e-8)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     path, _ = run_benchmark(
@@ -43,7 +45,9 @@ def main():
             "pool": args.fisher_general_pool,
             "starts": args.fisher_general_starts,
             "iters": args.fisher_general_iters,
-            "update_pool": args.fisher_general_update_pool},
+            "update_pool": args.fisher_general_update_pool,
+            "t_rank": args.fisher_t_rank,
+            "t_lambda_m": args.fisher_t_lambda_m},
         args.screen_n, args.supervisor_protocol, args.validation_split_seed)
     accepted = path.loc[path["within_stop"]] if "within_stop" in path else path
     row = accepted.iloc[-1]
@@ -57,7 +61,8 @@ def main():
         device=args.device, max_loss_error=path.attrs["tol_frac"],
         weights=args.weights, n_sigma=2.0,
         fisher_quant_gamma=args.fisher_quant_gamma,
-        fisher_general=path.attrs["fisher_general"])
+        fisher_general=path.attrs["fisher_general"],
+        fisher_t=path.attrs["fisher_t"])
     print(f"removed={row.frac_removed:.3%} val_loss={row.val_loss:.6f} "
           f"test_loss={row.test_loss:.6f}")
     print("moves=" + ", ".join(f"{kind}:{count}" for kind, count in counts.items()))

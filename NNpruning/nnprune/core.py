@@ -87,9 +87,12 @@ class Move:
     pred_cost: float = float("nan")
 
     def describe(self) -> str:
-        if self.kind == "fisher_general":
-            return (f"fisher_general[{self.site}] D={self.payload['n_deleted']} "
-                    f"U={self.payload['n_updates']} K={self.payload['closure_savings']}")
+        if self.kind in ("fisher_general", "fisher_t"):
+            repair = (f"S={self.payload['active_directions']}"
+                      if self.kind == "fisher_t"
+                      else f"U={self.payload['n_updates']}")
+            return (f"{self.kind}[{self.site}] D={self.payload['n_deleted']} "
+                    f"{repair} K={self.payload['closure_savings']}")
         if self.kind == "zero":
             return f"zero[{self.site}] x{int(self.payload['idx'].numel())}"
         keys = {k: v for k, v in self.payload.items() if not torch.is_tensor(v)}
@@ -120,6 +123,7 @@ class Adapter:
     prunable: list = []                # weight tensors eligible for 'zero' moves
     site_layer: dict = {}              # prunable name -> depth index
     move_groups: dict[str, tuple[str, ...]] = {"classic": ()}
+    move_kinds: tuple[str, ...] = ()
 
     def __init__(self, data: dict):
         self.data = data               # split -> (X, y)
@@ -137,7 +141,8 @@ class Adapter:
 
     def resolve_struct_kinds(self, kinds) -> tuple[str, ...]:
         requested = ("classic",) if kinds is None else tuple(kinds)
-        individual = {kind for members in self.move_groups.values() for kind in members}
+        individual = ({kind for members in self.move_groups.values() for kind in members}
+                      | set(self.move_kinds))
         unknown = [name for name in requested
                    if name not in self.move_groups and name not in individual]
         if unknown:
@@ -283,6 +288,8 @@ class PruneConfig:
     fisher_general_starts: int = 2
     fisher_general_iters: int = 4
     fisher_general_update_pool: int = 4
+    fisher_t_rank: int = 4
+    fisher_t_lambda_m: float = 1e-8
     # path
     max_steps: int = 100000
     expand_on_fail: int = 4              # retry with this many times more candidates before stopping
@@ -308,6 +315,10 @@ class PruneConfig:
         if min(self.fisher_general_lambda_u, self.fisher_general_lambda_d,
                self.fisher_general_mu) < 0:
             raise ValueError("fisher_general penalties must be non-negative")
+        if self.fisher_t_lambda_m < 0:
+            raise ValueError("fisher_t_lambda_m must be non-negative")
+        if self.fisher_t_rank < 1:
+            raise ValueError("fisher_t_rank must be positive")
         if min(self.fisher_general_window, self.fisher_general_min_savings,
                self.fisher_general_pool, self.fisher_general_starts,
                self.fisher_general_iters, self.fisher_general_update_pool) < 1:
@@ -650,7 +661,7 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
         # Grouped-Fisher compensation depends on the complete current set of
         # surviving activations and outgoing weights.  Never reuse a context
         # containing those candidates after any state change.
-        if ctx is not None and ctx.get("fisher_moves"):
+        if ctx is not None and (ctx.get("fisher_moves") or ctx.get("fisher_dynamic")):
             ctx = None
         rows.append(_row(adapter, state, k0, step=step, method=label, kind=mv.kind,
                          site=mv.site, move=mv.describe(), layer=mv.layer,
@@ -665,6 +676,8 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
                          quant_step=mv.payload.get("quant_step"),
                          n_deleted=mv.payload.get("n_deleted"),
                          n_updates=mv.payload.get("n_updates"),
+                         basis_rank=mv.payload.get("basis_rank"),
+                         active_directions=mv.payload.get("active_directions"),
                          closure_savings=mv.payload.get("closure_savings"),
                          search_objective=mv.payload.get("search_objective"),
                          seconds=time.time() - t0))

@@ -98,7 +98,8 @@ def run_benchmark(name: str, groups=("classic",), device="cpu",
                       fisher_quant_gamma=fisher_quant_gamma)
     if fisher_general:
         for key, value in fisher_general.items():
-            setattr(cfg, f"fisher_general_{key}", value)
+            prefix = "fisher_t_" if key.startswith("t_") else "fisher_general_"
+            setattr(cfg, prefix + key.removeprefix("t_"), value)
     path, final = prune_path(adapter, state, cfg, label="+".join(groups))
     path.attrs["candidate_config"] = {
         key: getattr(cfg, key) for key in (
@@ -108,6 +109,8 @@ def run_benchmark(name: str, groups=("classic",), device="cpu",
         key: getattr(cfg, f"fisher_general_{key}") for key in
         ("lambda_u", "lambda_d", "mu", "window", "min_savings", "pool",
          "starts", "iters", "update_pool")}
+    path.attrs["fisher_t"] = {
+        "rank": cfg.fisher_t_rank, "lambda_m": cfg.fisher_t_lambda_m}
     path.attrs["supervisor_protocol"] = supervisor_protocol
     path.attrs["validation_split_seed"] = validation_seed
     return path, final
@@ -139,7 +142,8 @@ def save_run_artifact(output, path, **metadata):
     selection_columns += [column for column in (
         "quant_case", "quant_weight_groups", "quant_total_groups",
         "quant_bias", "quant_step", "n_deleted", "n_updates",
-        "closure_savings", "search_objective") if column in selected]
+        "basis_rank", "active_directions", "closure_savings",
+        "search_objective") if column in selected]
     artifact = {
         **metadata,
         "result_schema": 2,

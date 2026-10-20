@@ -38,6 +38,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from .canonicalize.mlp import HiddenLayer, canonicalize_mlp
 from .core import ACTIVE, REMOVED, STEP, Adapter, Move, State, zero_entries
 
 CLASSIC_MOVES = ("unit_sat", "unit_mean", "unit_step", "unit_merge")
@@ -819,6 +820,7 @@ def moons_fresh_sample(scaler, n=8000, noise=0.25, seed=999):
 
 class MLPAdapter(Adapter):
     move_groups = MOVE_GROUPS
+    move_kinds = ("fisher_t",)
 
     def __init__(self, data, widths=(2, 50, 50, 50, 1), step_layers=(0,)):
         super().__init__(data)
@@ -909,23 +911,27 @@ class MLPAdapter(Adapter):
         self._kill(s, l, i)
 
     def canonicalize(self, s: State) -> None:
-        changed = True
-        while changed:
-            changed = False
-            for l in range(self.L - 1):
-                t = s.struct[f"type{l}"]
-                fan_out = s.masks[f"W{l + 1}"].any(0)
-                fan_in = s.masks[f"W{l}"].any(1)
-                alive = t != REMOVED
-                for i in (alive & ~fan_out).nonzero().flatten().tolist():
+        layers = []
+        for l in range(self.L - 1):
+            def remove(ids, l=l):
+                for i in ids.tolist():
                     self._kill(s, l, i)
-                    changed = True
-                t = s.struct[f"type{l}"]
-                const = (t == ACTIVE) & ~fan_in & s.masks[f"W{l + 1}"].any(0)
-                for i in const.nonzero().flatten().tolist():
-                    b = s.params[f"b{l}"][i] if bool(s.masks[f"b{l}"][i]) else s.params[f"b{l}"].new_zeros(())
+
+            def fold(ids, l=l):
+                for i in ids.tolist():
+                    b = (s.params[f"b{l}"][i] if bool(s.masks[f"b{l}"][i])
+                         else s.params[f"b{l}"].new_zeros(()))
                     self._fold_const(s, l, i, float(torch.sigmoid(b)))
-                    changed = True
+
+            layers.append(HiddenLayer(
+                live=lambda l=l: s.struct[f"type{l}"] != REMOVED,
+                constant=lambda l=l: s.struct[f"type{l}"] == ACTIVE,
+                fan_in=lambda l=l: s.masks[f"W{l}"].any(1),
+                fan_out=lambda l=l: s.masks[f"W{l + 1}"].any(0),
+                remove=remove,
+                fold=fold,
+            ))
+        canonicalize_mlp(layers)
 
     # ---- structural moves -------------------------------------------------------
     @torch.no_grad()
@@ -935,6 +941,9 @@ class MLPAdapter(Adapter):
         ctx = {"acts": acts, "act_mean": [a.mean(0) for a in acts],
                "merge_pairs": [], "ablation_shortlist": [], "fisher_moves": []}
         enabled = self.resolve_struct_kinds(cfg.struct_kinds)
+        ctx["fisher_dynamic"] = any(
+            kind.startswith("unit_fisher") or kind in ("fisher_general", "fisher_t")
+            for kind in enabled)
         merge_enabled = "unit_merge" in enabled
         for l, a in enumerate(acts):
             t = s.struct[f"type{l}"]
@@ -1009,6 +1018,9 @@ class MLPAdapter(Adapter):
         if "fisher_general" in enabled:
             from .fisher_general import graph_aware_fisher_moves
             ctx["fisher_moves"] = graph_aware_fisher_moves(self, s, cfg)
+        if "fisher_t" in enabled:
+            from .fisher_t import learned_basis_fisher_moves
+            ctx["fisher_moves"] = learned_basis_fisher_moves(self, s, cfg)
         return ctx
 
     @torch.no_grad()
@@ -1212,8 +1224,9 @@ class MLPAdapter(Adapter):
 
     def apply_structural(self, s: State, m: Move) -> bool:
         p = m.payload
-        if m.kind == "fisher_general":
+        if m.kind in ("fisher_general", "fisher_t"):
             for name, (indices, delta) in p["updates"].items():
+                indices = indices.to(s.params[name].device)
                 s.params[name].view(-1)[indices] += delta.to(s.params[name])
             for name, indices in p["deleted"].items():
                 zero_entries(s, name, indices.to(s.params[name].device))
