@@ -22,6 +22,8 @@ import torch.nn as nn
 from datasets import Dataset, concatenate_datasets, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from sparsegpt import sparsegpt_matrix
+
 DATASET_CACHE = Path(__file__).resolve().parent / "cache" / "datasets"
 EVALUATION_CACHE = Path(__file__).resolve().parent / "cache" / "evaluation"
 
@@ -104,14 +106,17 @@ def selection_sequences(tokenizer, dataset: str, seqlen: int, offset: int,
 
 
 @torch.inference_mode()
+def per_sequence_loss(model, sequences: list[torch.Tensor]) -> torch.Tensor:
+    ids = torch.cat(sequences).to(next(model.parameters()).device)
+    logits = model(ids, use_cache=False).logits[:, :-1].float()
+    labels = ids[:, 1:]
+    return nn.functional.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]), labels.reshape(-1),
+        reduction="none").reshape(len(ids), -1).mean(1).cpu()
+
+
 def sequence_losses(model, sequences: list[torch.Tensor]) -> list[float]:
-    losses = []
-    for ids in sequences:
-        logits = model(ids, use_cache=False).logits[:, :-1].float()
-        labels = ids[:, 1:]
-        losses.append(float(nn.functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))))
-    return losses
+    return per_sequence_loss(model, sequences).tolist()
 
 
 class StopCapture(RuntimeError):
@@ -218,38 +223,9 @@ def wanda_prune(module: nn.Linear, stats: WandaStats, sparsity: float):
 @torch.inference_mode()
 def sparsegpt_prune(module: nn.Linear, stats: HessianStats, sparsity: float,
                     percdamp: float, blocksize: int):
-    """Official SparseGPT unstructured reconstruction kernel, made CPU-safe."""
-    W = module.weight.data.float().clone()
-    H = stats.H
-    dead = H.diag() == 0
-    H[dead, dead] = 1
-    W[:, dead] = 0
-    diagonal = torch.arange(H.shape[0])
-    H[diagonal, diagonal] += percdamp * H.diag().mean()
-    Hinv = torch.linalg.cholesky(
-        torch.cholesky_inverse(torch.linalg.cholesky(H)), upper=True)
-
-    for start in range(0, W.shape[1], blocksize):
-        end = min(start + blocksize, W.shape[1])
-        W1 = W[:, start:end].clone()
-        Q1 = torch.zeros_like(W1)
-        errors = torch.zeros_like(W1)
-        H1 = Hinv[start:end, start:end]
-        metric = W1.square() / H1.diag()[None, :].square()
-        threshold = torch.sort(metric.flatten()).values[int(metric.numel() * sparsity)]
-        mask = metric <= threshold
-        for col in range(end - start):
-            w = W1[:, col]
-            d = H1[col, col]
-            q = w.clone()
-            q[mask[:, col]] = 0
-            Q1[:, col] = q
-            error = (w - q) / d
-            W1[:, col:] -= error[:, None] @ H1[col, col:][None, :]
-            errors[:, col] = error
-        W[:, start:end] = Q1
-        W[:, end:] -= errors @ Hinv[start:end, end:]
-    module.weight.data.copy_(W.to(module.weight.dtype))
+    values, _ = sparsegpt_matrix(
+        module.weight, stats.H, sparsity, percdamp, blocksize)
+    module.weight.copy_(values)
 
 
 @torch.inference_mode()

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -14,11 +12,11 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "NNpruning"))
-sys.path.insert(0, str(ROOT / "tf_ext"))
 
-from modern_baselines import sparsegpt_matrix  # noqa: E402
 from nnprune.experiments import (checkpoint_sha256, load_benchmark,
                                  split_validation)  # noqa: E402
+from result_artifacts import write_json  # noqa: E402
+from sparsegpt import sparsegpt_matrix  # noqa: E402
 
 
 def parse_args():
@@ -42,13 +40,6 @@ def schedule(fine_spacing, fine_until, coarse_spacing, maximum):
                           coarse_spacing, dtype=torch.float64).tolist()
     return ([round(value, 10) for value in fine]
             + [round(value, 10) for value in coarse if value > fine_until + 1e-9])
-
-
-def save(path, content):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(content, indent=2) + "\n")
-    os.replace(temporary, path)
 
 
 def calibration_inputs(adapter, state, count):
@@ -97,7 +88,8 @@ def sparsegpt_state(adapter, initial, inputs, sparsity):
     for name in ("W_Q", "W_K", "W_V", "W_O", "W_in", "W_out"):
         weight = matrix_view(adapter, state, name)
         reconstructed, pruned = sparsegpt_matrix(
-            weight, inputs[name], sparsity, percdamp=.01, blocksize=128)
+            weight, inputs[name].float().T @ inputs[name].float(), sparsity,
+            percdamp=.01, blocksize=128)
         write_matrix(adapter, state, name, reconstructed, pruned)
     adapter.canonicalize(state)
     return state
@@ -140,8 +132,8 @@ def sparsegpt_curve(adapter, initial, sparsities, calibration, args):
         rows.append(row)
         if stop_index is None and delta > 2 * se + .05 * base_loss:
             stop_index = len(rows) - 2
-        save(args.output, {**common, "status": "running", "history": rows,
-                           "stop_index": stop_index})
+        write_json(args.output, {**common, "status": "running", "history": rows,
+                                 "stop_index": stop_index})
         print(f"SparseGPT target {100*sparsity:.0f}%: "
               f"removed {100*row['frac_removed']:.2f}%, "
               f"test loss {row['test_loss']/base_test['loss']:.3f}x", flush=True)
@@ -165,7 +157,7 @@ def main():
     adapter.data = split_validation(adapter.data)
     calibration = calibration_inputs(adapter, initial, args.calibration)
     artifact = sparsegpt_curve(adapter, initial, sparsities, calibration, args)
-    save(args.output, artifact)
+    write_json(args.output, artifact, "modadd")
     print(f"Saved {args.output}", flush=True)
 
 

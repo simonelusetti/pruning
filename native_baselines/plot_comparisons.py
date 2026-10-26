@@ -13,14 +13,7 @@ MODADD_GRID = ROOT / "native_baselines" / "results_modadd_grid"
 PLOTS = ROOT / "plots"
 COLORS = {
     "classic": "#777777",
-    "fisher": "#2878c8",
-    "dual": "#9457a4",
-    "quant002": "#147d92",
-    "quant005": "#2a9d6f",
-    "quant01": "#42a66c",
-    "quant02": "#d5822a",
-    "quant_post": "#b05f24",
-    "quant04": "#c44e52",
+    "fisher_general": "#2a9d6f",
     "sparsegpt": "#222222",
 }
 
@@ -47,9 +40,33 @@ def berman_loss_curve(path):
     base = history[0]["test_loss"]
     stop = berman_stop(data)
     history = history[:stop + 1] if stop is not None else history
+    rejected = data.get("rejected_candidate")
+    point = ((100 * rejected["frac_removed"], rejected["test_loss"] / base)
+             if rejected and data.get("method") == "fisher_sparsegpt" else None)
     return ([100 * row["frac_removed"] for row in history],
             [row["test_loss"] / base for row in history],
-            stop, None)
+            stop, point)
+
+
+def berman_matched_axb_curve(path):
+    data = read(path)
+    runs = data["runs"]
+    stop = data["stop_index"]
+    base = data["reference_test_loss"]
+    if not 0 <= stop <= len(runs) or base <= 0:
+        raise ValueError(f"invalid matched AXB result {path}")
+    accepted = runs[:stop]
+    if any(not run["arms"]["full"]["admissible"] for run in accepted):
+        raise ValueError(f"accepted prefix contains a rejected run in {path}")
+    rejected = runs[stop] if stop < len(runs) else None
+    if rejected is not None and rejected["arms"]["full"]["admissible"]:
+        raise ValueError(f"first rejected point is admissible in {path}")
+    x = [0.] + [100 * run["arms"]["full"]["frac_removed"] for run in accepted]
+    y = [1.] + [run["arms"]["full"]["test_loss"] / base for run in accepted]
+    point = ((100 * rejected["arms"]["full"]["frac_removed"],
+              rejected["arms"]["full"]["test_loss"] / base)
+             if rejected is not None else None)
+    return x, y, len(x) - 1 if rejected is not None else None, point
 
 
 def sweep_loss_curve(path):
@@ -171,7 +188,8 @@ def draw(output, title, subtitle, specs, xlim=None, ylim=None,
             has_diagnostic = True
             ax.plot(x[stop:], y[stop:], color=color, linestyle=":", linewidth=2,
                     alpha=.55)
-        ax.scatter(x[-1], y[-1], color=color, s=55, zorder=5)
+        endpoint = stop if stop is not None else len(x) - 1
+        ax.scatter(x[endpoint], y[endpoint], color=color, s=55, zorder=5)
         if stop is not None:
             ax.scatter(x[stop], y[stop], facecolors="white", edgecolors=color,
                        linewidths=2.2, s=105, zorder=6)
@@ -218,12 +236,7 @@ def main():
         LOCAL / "moons_fisher_general.json",
         LOCAL / "moons_berman.json",
     ])
-    validate_local_protocol([
-        LOCAL / "modadd_classic.json", LOCAL / "modadd_fisher.json",
-        LOCAL / "modadd_fisher_dual.json", LOCAL / "modadd_fisher_quantized_g002.json",
-        LOCAL / "modadd_fisher_quantized_g005.json", LOCAL / "modadd_fisher_quantized_g02.json",
-        LOCAL / "modadd_fisher_quantized_post_g02.json",
-    ])
+    validate_local_protocol([LOCAL / "modadd_classic.json"])
     draw(
         PLOTS / "two_moons" / "comparison.png",
         "Two moons: pruning comparison",
@@ -234,7 +247,7 @@ def main():
             ("classic + weight zeroing", LOCAL / "moons_classic_weights.json",
              local_test_curve, COLORS["classic"], "--"),
             ("Fisher general", LOCAL / "moons_fisher_general.json", local_test_curve,
-             COLORS["quant005"], "-"),
+             COLORS["fisher_general"], "-"),
             ("Berman et al. iterative", LOCAL / "moons_berman.json",
              local_test_curve, COLORS["sparsegpt"], "--"),
         ),
@@ -244,20 +257,38 @@ def main():
         y_formatter=lambda value, _position: f"{value:.2f}×",
         ylim=(.95, 1.45),
     )
+    berman_fisher = BERMAN / "fisher_general.json"
+    berman_fisher_label = "Fisher General"
+    if not berman_fisher.exists():
+        berman_fisher = BERMAN / "fisher_miqp.json"
+        berman_fisher_label = "Fisher General MIQP (saved run)"
     berman_specs = (
         ("classic structural only", BERMAN / "classic.json", berman_loss_curve,
          COLORS["classic"], "--"),
         ("classic + weight zeroing", BERMAN / "classic_weights.json", berman_loss_curve,
          COLORS["classic"], "-"),
-        ("Fisher general + validation selection", BERMAN / "fisher_general.json", berman_loss_curve,
-         COLORS["dual"], "-"),
+        (berman_fisher_label, berman_fisher, berman_loss_curve,
+         COLORS["fisher_general"], "-"),
+        ("Fisher General (heuristic support search)", BERMAN / "fisher_general_score.json",
+         berman_loss_curve, "#b8792e", "-"),
         ("Berman et al. iterative", BERMAN / "berman_iterative.json",
          berman_loss_curve, COLORS["sparsegpt"], "--"),
-        ("Berman + validation selection", BERMAN / "berman_validated.json",
-         berman_loss_curve, COLORS["quant02"], "-"),
-        ("Fisher general, score-only", BERMAN / "fisher_general_score.json",
-         berman_loss_curve, COLORS["fisher"], "--"),
     )
+    fisher_sparse_path = BERMAN / "fisher_sparsegpt.json"
+    berman_ymax = 1.20
+    if fisher_sparse_path.exists() and json.loads(fisher_sparse_path.read_text()).get("status") == "complete":
+        berman_specs += (("Fisher-aware SparseGPT", fisher_sparse_path,
+                          berman_loss_curve, "#d1495b", "-"),)
+        sparse_data = read(fisher_sparse_path)
+        rejected = sparse_data.get("rejected_candidate")
+        if rejected:
+            berman_ymax = max(berman_ymax, rejected["test_loss"] /
+                              sparse_data["history"][0]["test_loss"] + .02)
+    matched_axb_path = BERMAN / "berman_matched_axb_updates.json"
+    if (matched_axb_path.exists() and
+            json.loads(matched_axb_path.read_text()).get("status") == "complete"):
+        berman_specs += (("AXB OBS + full updates (block quotas)", matched_axb_path,
+                          berman_matched_axb_curve, "#7b4ab8", "-"),)
     validate_berman_protocol([path for _label, path, _loader, _color, _style
                               in berman_specs])
     draw(
@@ -265,7 +296,7 @@ def main():
         "Berman SimpleNN/MNIST: pruning comparison",
         "official checkpoint · identical splits · 2σ stopping · held-out test loss",
         berman_specs,
-        xlim=(0, 70), ylim=(.95, 1.20),
+        xlim=(0, 70), ylim=(.95, berman_ymax),
         ylabel="held-out test loss relative to original",
         margin_y=1.05,
         margin_label=r"1.05× practical margin $\rho$; $2\,\mathrm{SE}$ uses validation",

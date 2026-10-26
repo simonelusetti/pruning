@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 from pathlib import Path
@@ -12,16 +11,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from run_cpu_close import (calibration_tokens, linear_layers, run_weight_method,
                            selection_sequences, sequence_losses)
+from result_artifacts import write_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def save(path, content):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(content, indent=2) + "\n")
-    os.replace(temporary, path)
+    write_json(path, content, "opt")
 
 
 def decoder_parameters(model):

@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from .core import PruneConfig, prune_path
+from .fisher import FisherStrategy
 from . import mlp as M
 from . import transformer as T
 
@@ -70,7 +71,8 @@ def checkpoint_sha256(name: str) -> str:
 
 def run_benchmark(name: str, groups=("classic",), device="cpu",
                   max_loss_error=0.05, verbose=True, weights=False,
-                  fisher_quant_gamma=0.2, fisher_general=None, screen_n=None,
+                  fisher_strategy: FisherStrategy | None = None,
+                  fisher_options=None, screen_n=None,
                   supervisor_protocol=False, validation_split_seed=None):
     adapter, state = load_benchmark(name, device)
     validation_seed = (123 if supervisor_protocol else 0) if validation_split_seed is None \
@@ -92,25 +94,23 @@ def run_benchmark(name: str, groups=("classic",), device="cpu",
                         max_frac=0.97, seed=123)
         if weights:
             protocol["weight_score"] = "fdist"
-    cfg = PruneConfig(**base, **protocol, struct_kinds=tuple(groups),
+    options = {f"fisher_{key}": value
+               for key, value in (fisher_options or {}).items()}
+    cfg = PruneConfig(**base, **protocol, **options, struct_kinds=tuple(groups),
+                      fisher_strategy=fisher_strategy,
                       select_split="valA", stop_split="valB", n_sigma=2.0,
-                      tol_frac=max_loss_error, verbose=verbose,
-                      fisher_quant_gamma=fisher_quant_gamma)
-    if fisher_general:
-        for key, value in fisher_general.items():
-            prefix = "fisher_t_" if key.startswith("t_") else "fisher_general_"
-            setattr(cfg, prefix + key.removeprefix("t_"), value)
+                      tol_frac=max_loss_error, verbose=verbose)
     path, final = prune_path(adapter, state, cfg, label="+".join(groups))
     path.attrs["candidate_config"] = {
         key: getattr(cfg, key) for key in (
             "weight_per_site", "n_struct", "n_merge", "refresh_every",
             "screen_n", "n_mc", "expand_on_fail")}
-    path.attrs["fisher_general"] = {
-        key: getattr(cfg, f"fisher_general_{key}") for key in
-        ("lambda_u", "lambda_d", "mu", "window", "min_savings", "pool",
-         "starts", "iters", "update_pool")}
-    path.attrs["fisher_t"] = {
-        "rank": cfg.fisher_t_rank, "lambda_m": cfg.fisher_t_lambda_m}
+    path.attrs["fisher"] = {
+        "strategy": (cfg.fisher_strategy.as_dict()
+                     if cfg.fisher_strategy is not None else None),
+        **{key: getattr(cfg, f"fisher_{key}") for key in
+        ("lambda_u", "lambda_d", "mu", "pool", "time_limit", "gap",
+         "bound", "log")}}
     path.attrs["supervisor_protocol"] = supervisor_protocol
     path.attrs["validation_split_seed"] = validation_seed
     return path, final
@@ -119,8 +119,8 @@ def run_benchmark(name: str, groups=("classic",), device="cpu",
 def save_run_artifact(output, path, **metadata):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    if path.empty or any(right >= left for left, right in
-                         zip(path["k_eff"], path["k_eff"].iloc[1:])):
+    if any(right >= left for left, right in
+           zip(path["k_eff"], path["k_eff"].iloc[1:])):
         raise ValueError("pruning history must strictly reduce k_eff")
     for column in ("frac_removed", "train_loss", "val_loss", "test_loss"):
         if not all(math.isfinite(float(value)) for value in path[column]):
@@ -129,21 +129,21 @@ def save_run_artifact(output, path, **metadata):
         flags = path["within_stop"].astype(bool).tolist()
         if flags != sorted(flags, reverse=True):
             raise ValueError("within_stop must be a true prefix")
-        tolerance = (path.attrs["tol_abs"] + path.attrs.get("tol_frac", 0.0)
-                     * path.attrs["stop_reference"])
-        for _, row in path.iloc[1:].iterrows():
-            passed = row.stop_mean <= path.attrs["n_sigma"] * row.stop_se + tolerance
-            if bool(row.stop_pass) != bool(passed):
-                raise ValueError("stored stopping decision does not match its statistics")
+        if path.attrs.get("decision", "validate") == "validate":
+            tolerance = (path.attrs["tol_abs"] + path.attrs.get("tol_frac", 0.0)
+                         * path.attrs["stop_reference"])
+            for _, row in path.iloc[1:].iterrows():
+                passed = row.stop_mean <= path.attrs["n_sigma"] * row.stop_se + tolerance
+                if bool(row.stop_pass) != bool(passed):
+                    raise ValueError("stored stopping decision does not match its statistics")
     history = json.loads(path.to_json(orient="records"))
     accepted = path.loc[path["within_stop"]] if "within_stop" in path else path
     selected = accepted.loc[accepted["kind"] != ""]
     selection_columns = ["step", "kind", "site", "layer", "move", "dk", "pred_cost"]
     selection_columns += [column for column in (
-        "quant_case", "quant_weight_groups", "quant_total_groups",
-        "quant_bias", "quant_step", "n_deleted", "n_updates",
-        "basis_rank", "active_directions", "closure_savings",
-        "search_objective") if column in selected]
+        "n_deleted", "n_updates", "closure_savings",
+        "search_objective", "solver_objective", "solver_gap",
+        "solver_seconds", "compensation_bound_active") if column in selected]
     artifact = {
         **metadata,
         "result_schema": 2,
@@ -152,9 +152,6 @@ def save_run_artifact(output, path, **metadata):
         "stop_index": int(accepted.index[-1]),
         "summary": json.loads(accepted.iloc[-1].to_json()),
         "move_counts": {str(k): int(v) for k, v in selected["kind"].value_counts().items()},
-        "quantization_counts": ({str(k): int(v) for k, v in
-                                 selected["quant_case"].dropna().value_counts().items()}
-                                if "quant_case" in selected else {}),
         "selections": json.loads(selected[selection_columns].to_json(orient="records")),
         "history": history,
     }

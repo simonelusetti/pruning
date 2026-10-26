@@ -1,37 +1,29 @@
 # NNpruning
 
-The framework represents pruning operations as moves, screens structural candidates on training data, selects them on validation data, and keeps parameter counting and stopping anchored to the original model.
+The project has three maintained pruning paths:
 
-## Move groups
+- `classic`: the supervisor's structural moves. Set `--weights` to obtain W+S; omit it for S only.
+- `fisher_general`: graph-aware parameter deletion and compensation solved by Gurobi MIQP. It currently supports Bernoulli MLPs.
+- Fisher-aware SparseGPT: the scalable OPT path in `native_baselines/run_opt_fisher_sparsegpt.py`.
 
-| Group | MLP moves | Purpose |
-|---|---|---|
-| `classic` | `unit_sat`, `unit_mean`, `unit_step`, `unit_merge` | Original supervisor framework; this is the default. |
-| `outdated` | `unit_ablate` | Retained only for old comparisons. |
-| `extension` | quantized Fisher compensation variants | Other current research moves, selectable individually. |
-| `fisher` | `unit_fisher` | One compensated deletion per neuron, ranked in the downstream Fisher metric. |
+Classic remains its own algorithm. The Fisher paths are presets over five explicit axes:
 
-The modular-addition transformer adds `head_fisher` to the `fisher` group and retains QK/OV rank cuts unchanged in both comparisons. The pre-LayerNorm GPT adapter uses the same older group names; its later stream, low-rank, token/head, and K/V-sharing experiments are `outdated`.
+| preset | geometry | deletion | compensation | update scope | structure | decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fisher_general` | full Fisher on the bounded MLP pool | MIQP | sparse MIQP | global | reward canonical closure | validate |
+| `fisher_sparsegpt` | cached `A x B` | generalized OBS | SparseGPT propagation | layer | post-process | proxy |
 
-`PruneConfig(struct_kinds=None)` selects `classic`. Groups and individual moves can be combined, for example `struct_kinds=("classic", "fisher")` or `struct_kinds=("unit_fisher", "unit_mean")`.
-
-## Maintained suite
-
-- `moons`: small sigmoid MLP for fast correctness and move-selection checks.
-- `modadd`: one-layer modular-addition transformer for a larger run that remains practical on CPU.
-- `native_baselines/`: pinned launchers for SparseGPT, Wanda, and FLAP in their own model and dataset settings. These require their external checkpoints and normally a CUDA machine.
-
-Cached local starting states live in `checkpoints/`. Each command writes one JSON result containing the metric history, accepted selections in order, and move counts. Use `--output` to choose its path.
+The MLP backend also supports dense compensation, post-process structural accounting, and proxy decisions. The OPT backend supports `A x I`, disabling post-process canonicalization, target-wise validation, and a bounded layer-local MIQP with `A x B`. Unsupported combinations fail before a run starts. Two-moons is the quick MLP benchmark; modular addition is the minute-scale transformer benchmark and supports Classic only. Berman, SparseGPT, Wanda, and FLAP remain comparison baselines rather than framework branches.
 
 ```bash
 cd NNpruning
-python run_experiments.py moons --moves classic fisher --max-loss-error 0.05
-python run_experiments.py modadd --moves classic --device cuda --max-loss-error 0.05
+python3 run_experiments.py moons --moves classic
+python3 run_experiments.py moons --moves classic --weights
+python3 run_experiments.py moons --moves fisher_general
+python3 run_experiments.py moons --moves fisher \
+  --fisher-preset fisher_general --fisher-compensation dense \
+  --fisher-structure post --fisher-decision proxy
+python3 run_experiments.py modadd --moves classic --device cuda
 ```
 
-The adapter and state can also be moved directly:
-
-```python
-adapter = adapter.to("cuda")
-state = state.to("cuda")
-```
+Adapters and states move between CPU and CUDA with `.to(device)`.

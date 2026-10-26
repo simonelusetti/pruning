@@ -28,6 +28,17 @@ def main():
               for label, name, color, style in classics]
     sparse_path = RESULTS / "sparsegpt_curve.json"
     sparse = json.loads(sparse_path.read_text()) if sparse_path.exists() else None
+    fisher_sparse_path = RESULTS / "fisher_sparsegpt.json"
+    fisher_sparse = (json.loads(fisher_sparse_path.read_text())
+                     if fisher_sparse_path.exists() else None)
+    fisher_miqp = None
+    for name in ("fisher_local_miqp_10pct.json", "fisher_local_miqp_full.json"):
+        path = RESULTS / name
+        if path.exists():
+            candidate = json.loads(path.read_text())
+            if len(candidate.get("curve", ())) > 1:
+                fisher_miqp = candidate
+                break
     denominator = loaded[0][1]["prunable_decoder_linear_parameters"]
 
     fig, axis = plt.subplots(figsize=(12, 7))
@@ -64,6 +75,62 @@ def main():
             axis.scatter(sparse_x[stop], sparse_y[stop], facecolors="white",
                          edgecolors="#333333", linewidths=2.2, s=105, zorder=4)
 
+    if fisher_sparse and len(fisher_sparse.get("curve", ())) > 1:
+        curve = fisher_sparse["curve"]
+        label = "Fisher-aware SparseGPT"
+        if fisher_sparse.get("status") != "complete":
+            label += " (running)"
+        axis.plot([row["removed_percent"] for row in curve],
+                  [row["loss_damage_percent"] for row in curve],
+                  color="#d1495b", linewidth=2.8, marker="o", label=label)
+
+    general_path = RESULTS / "fisher_general_miqp.json"
+    if general_path.exists():
+        general = json.loads(general_path.read_text())
+        sweep = general.get("sweep", [])
+        stop = next((i for i, row in enumerate(sweep)
+                     if not row.get("admissible", True)), None)
+        shown = sweep if stop is None else sweep[:stop + 1]
+        if shown:
+            axis.plot([100 * row["frac_removed"] for row in shown],
+                      [row["loss_damage_percent"] for row in shown],
+                      color="#60813e", linewidth=2.2, marker=".",
+                      label="Fisher General MIQP (earlier candidate domain)")
+        if stop is not None:
+            row = sweep[stop]
+            axis.scatter(100 * row["frac_removed"], row["loss_damage_percent"],
+                         marker="x", color="#60813e", s=85, zorder=4)
+
+    complement_path = RESULTS / "fisher_complement.json"
+    if complement_path.exists():
+        complement = json.loads(complement_path.read_text())
+        curve = complement.get("curve", [])
+        if len(curve) > 1:
+            label = "AXB OBS: full-layer compensation"
+            if complement.get("status") != "complete":
+                label += f" ({complement.get('status', 'unknown')})"
+            axis.plot([row["removed_percent"] for row in curve],
+                      [row["loss_damage_percent"] for row in curve],
+                      color="#e09f3e", linewidth=2.2, marker="s", label=label)
+        else:
+            status = complement.get("status", "unknown")
+            axis.text(.02, .03,
+                      f"Full-layer AXB compensation: {status}; no evaluated target yet",
+                      transform=axis.transAxes, fontsize=10, color="#a66b13")
+
+    if fisher_miqp and len(fisher_miqp.get("curve", ())) > 1:
+        curve = fisher_miqp["curve"]
+        x = [row["removed_percent"] for row in curve]
+        y = [row["loss_damage_percent"] for row in curve]
+        label = "Fisher General: local AXB MIQP"
+        if fisher_miqp.get("status") != "complete":
+            label += " (running)"
+        axis.plot(x, y, color="#2a9d8f", linewidth=2.2, marker="D",
+                  markersize=7, label=label)
+        axis.annotate(f"{x[-1]:.3f}%", (x[-1], y[-1]), xytext=(16, 14),
+                      textcoords="offset points", color="#2a9d8f", fontsize=9,
+                      arrowprops={"arrowstyle": "-", "color": "#2a9d8f"})
+
     axis.axhline(5, color="#666666", linestyle="--", linewidth=1.4,
                  label="5% practical margin")
     axis.set_xlim(0, 52)
@@ -74,8 +141,15 @@ def main():
     axis.grid(axis="y", color="#dddddd")
     axis.spines[["top", "right"]].set_visible(False)
     axis.legend(frameon=False, ncols=2)
-    mode = "exact classic pruning" if len(loaded) == 2 else "classic fast"
-    axis.set_title(f"OPT-125M: {mode} and published SparseGPT", loc="left",
+    mode = ("exact classic pruning" if all(
+        (RESULTS / name).exists() for _, name, _, _ in exact) else "classic fast")
+    fisher_names = []
+    if fisher_sparse:
+        fisher_names.append("Fisher-aware SparseGPT")
+    if fisher_miqp:
+        fisher_names.append("local Fisher MIQP")
+    fisher_extra = f", {', '.join(fisher_names)}" if fisher_names else ""
+    axis.set_title(f"OPT-125M: {mode}{fisher_extra}, and published SparseGPT", loc="left",
                    fontsize=20, fontweight="bold", pad=24)
     subtitle = "128×2048 C4 calibration pool · identical C4 selection split · seed 0"
     if not sparse:

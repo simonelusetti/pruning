@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""The Berman SimpleNN/MNIST arms on the modular-addition transformer (NNpruning modadd).
-
-Same protocol and Fisher objective as run_berman_mnist.py.  theta = every live parameter
-(B_attn excluded: it is only a fold target of classic moves).
-Weight moves: Berman's 10% step (smallest 1/2 theta_i^2 F_ii), zeroed or compensated within
-its row.  A row = the parameters feeding one output coordinate: W_in, W_out, W_U with their
-bias, W_O per residual coordinate (all heads), W_Q / W_K / W_V per (head, dim), W_E per token,
-W_pos per position.  Rows of W_Q, W_K, W_E, W_pos enter nonlinearly: their Fisher is first order.
-Neuron moves: attention heads, D = W_O[h], R = the other heads' W_O (exact Schur);
-MLP units, D = W_out[:, i], R = other columns + b_out with F ~ E[a a^T] (x) E[M] (Kronecker),
-under which the compensation is the regression of a_i on the surviving units and 1.
-Every reported cost is 1/2 delta^T F delta of the applied delta under the exact Fisher.
-"""
+"""Classic and Berman pruning on the modular-addition benchmark."""
 from __future__ import annotations
 
 import argparse
@@ -26,20 +14,18 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "NNpruning"))
 sys.path.insert(0, str(ROOT / "native_baselines"))
-from nnprune.core import ACTIVE, PruneConfig, refresh
+from nnprune.core import PruneConfig, refresh
 from nnprune.experiments import TF_BASE, load_benchmark, split_validation
-from run_berman_mnist import paired, save, schur, schur_invertible
+from result_artifacts import write_json as save
+from run_berman_mnist import paired
 
 RESULTS = ROOT / "native_baselines" / "results_modadd_grid"
 NAMES = ("W_E", "W_pos", "W_Q", "W_K", "W_V", "W_O", "W_in", "b_in", "W_out", "b_out",
          "W_U", "b_U")
 COMMON = {"result_schema": 3, "model": "modadd_p59_one_layer_transformer",
           "dataset": "a + b mod 59", "checkpoint": "checkpoints/modadd_seed0.pt"}
-MOVES = {"classic_weights": ["classic", "weight_zero"],
-         "fisher": ["unit_fisher", "head_fisher", "weight_fisher", "weight_zero"],
-         "fisher_weights": ["weight_fisher", "weight_zero"],
-         "fisher_zero": ["weight_zero"],
-         "fisher_zero_units": ["unit_zero", "head_zero", "weight_zero"]}
+MOVES = {"classic": ("classic",),
+         "classic_weights": ("classic", "weight_zero")}
 
 
 # --------------------------------------------------------------------------
@@ -171,93 +157,6 @@ def weight_zero_candidates(theta, live, diag, k0, frac):
              "fisher_cost": .5 * float((theta.square() * diag)[D].sum())}]
 
 
-def weight_fisher_candidates(theta, live, diag, rows, idx, k0, frac):
-    D = berman_step(theta, live, diag, round(frac * k0))
-    new, cost = theta.clone(), 0.
-    for g, I in idx.items():
-        delta, row_cost = schur(rows[g], theta[I], D[I])
-        new[I] += delta
-        cost += float(row_cost.sum())
-    new[D] = 0
-    def apply(state):
-        set_flat(state, new, live & ~D)
-    return [{"kind": "weight_fisher", "label": f"weight_fisher:{int(D.sum())}", "apply": apply,
-             "fisher_cost": cost}]
-
-
-def head_candidates(adapter, state, theta, live, F_O, idx, per_family, compensate):
-    wo = idx["W_O"].flatten()
-    th, lv = theta[wo], live[wo]
-    head = torch.arange(len(wo)) % (adapter.H * adapter.dh) // adapter.dh
-    heads = [h for h in range(adapter.H) if bool(state.struct["head_alive"][h])
-             and bool(lv[head == h].any())]
-    if not heads:
-        return []
-    D = torch.stack([(head == h) & lv for h in heads])
-    if not compensate:
-        delta = -th * D
-        cost = .5 * ((delta @ F_O) * delta).sum(1)
-    else:
-        try:
-            delta, cost = schur_invertible(F_O, th, D)
-        except RuntimeError:
-            delta, cost = schur(F_O.expand(len(heads), -1, -1), th.expand(len(heads), -1), D)
-    saved = torch.tensor([sum(int(state.masks[n][h].sum()) for n in ("W_Q", "W_K", "W_V", "W_O"))
-                          for h in heads], dtype=cost.dtype)
-    kind = "head_fisher" if compensate else "head_zero"
-    out = []
-    for j in (cost / saved).argsort()[:per_family].tolist():
-        new, new_live = theta.clone(), live.clone()
-        new[wo] += delta[j]
-        new[wo[D[j]]] = 0
-        new_live[wo[D[j]]] = False
-        out.append({"kind": kind, "label": f"{kind}:h{heads[j]}",
-                    "apply": lambda state, new=new, new_live=new_live: set_flat(state, new, new_live),
-                    "fisher_cost": float(cost[j])})
-    return out
-
-
-@torch.no_grad()
-def unit_candidates(adapter, state, X, per_family, compensate):
-    """MLP unit i: delta x2 (last position) = W_out[:, i] r(x), r = residual of a_i after the
-    compensation (r = -a_i without it); exact cost 1/2 E[r^2 sum_c (s_c . W_U^T W_out[:, i])^2]."""
-    P = {k: v.double() for k, v in adapter.effective(state).items()}
-    logits, cache = adapter.forward_full(P, state.struct, X)
-    units = ((state.struct["unit_type"] == ACTIVE) & state.masks["W_out"].any(0)).nonzero().flatten()
-    if not units.numel():
-        return []
-    A = torch.cat((cache["act"][:, -1], torch.ones(len(X), 1, dtype=logits.dtype)), 1)
-    q = (sqrt_fisher(logits.softmax(-1)) @ (P["W_U"].T @ P["W_out"][:, units])).square().sum(1)
-    D = torch.zeros(len(units), A.shape[1], dtype=torch.bool)
-    D[torch.arange(len(units)), units] = True
-    if compensate:
-        alive = torch.zeros(A.shape[1], dtype=A.dtype)
-        alive[units] = 1
-        alive[-1] = 1
-        delta, _ = schur((A.T @ A / len(X)).expand(len(units), -1, -1),
-                         alive.expand(len(units), -1), D)   # -1 at i, regression weights elsewhere
-    else:
-        delta = -D.to(A.dtype)
-    cost = .5 * ((A @ delta.T).square() * q).mean(0)
-    saved = (state.masks["W_out"][:, units].sum(0) + state.masks["W_in"][units].sum(1)
-             + state.masks["b_in"][units]).to(cost.dtype)
-    kind = "unit_fisher" if compensate else "unit_zero"
-    out = []
-    for j in (cost / saved).argsort()[:per_family].tolist():
-        i, d = int(units[j]), delta[j]
-        def apply(state, i=i, d=d):
-            W = torch.cat((state.params["W_out"], state.params["b_out"][:, None]), 1).double()
-            M = torch.cat((state.masks["W_out"], state.masks["b_out"][:, None]), 1)
-            W = (W + torch.outer(W[:, i], d) * M) * M   # updates never revive pruned entries
-            W[:, i] = 0
-            state.params["W_out"] = W[:, :-1].to(state.params["W_out"].dtype).contiguous()
-            state.params["b_out"] = W[:, -1].to(state.params["b_out"].dtype).contiguous()
-            state.masks["W_out"][:, i] = False
-        out.append({"kind": kind, "label": f"{kind}:n{i}", "apply": apply,
-                    "fisher_cost": float(cost[j])})
-    return out
-
-
 def classic_candidates(adapter, state):
     cfg = PruneConfig(**dict(TF_BASE, weight_per_site=0), struct_kinds=("classic",),
                       verbose=False)
@@ -334,21 +233,12 @@ def run_greedy(args, method, adapter, state, X_fisher):
         "stopping_point": rows[-1], "rejected_candidate": rejected, "history": rows,
         "move_counts": {k: sum(r.get("kind") == k for r in rows)
                         for k in sorted({r["kind"] for r in rows[1:]})}})
-    blocks = "weight_fisher" in moves or "head_fisher" in moves or "head_zero" in moves
     for step in range(1, args.max_steps + 1):
-        theta, live = get_flat(adapter, state)
-        diag, F_rows, F_O, idx = fisher(adapter, state, X_fisher, blocks)
-        proposals = weight_zero_candidates(theta, live, diag, k0, args.weight_frac)
-        if "weight_fisher" in moves:
-            proposals += weight_fisher_candidates(theta, live, diag, F_rows, idx, k0,
-                                                  args.weight_frac)
-        for kind, compensate in (("head_fisher", True), ("head_zero", False)):
-            if kind in moves:
-                proposals += head_candidates(adapter, state, theta, live, F_O, idx,
-                                             args.per_family, compensate)
-        for kind, compensate in (("unit_fisher", True), ("unit_zero", False)):
-            if kind in moves:
-                proposals += unit_candidates(adapter, state, X_fisher, args.per_family, compensate)
+        proposals = []
+        if "weight_zero" in moves:
+            theta, live = get_flat(adapter, state)
+            diag = fisher(adapter, state, X_fisher, blocks=False)[0]
+            proposals += weight_zero_candidates(theta, live, diag, k0, args.weight_frac)
         if "classic" in moves:
             proposals += classic_candidates(adapter, state)
         k_now, evaluated = adapter.k_eff(state), []

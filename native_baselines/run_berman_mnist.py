@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
-"""Berman SimpleNN/MNIST: Berman iterative vs classic + weight zeroing vs compensated Fisher.
-
-Every Fisher deletion solves the same problem.  D = parameters set to zero, R = live
-parameters that compensate, F = model Fisher (sum over classes, not empirical):
-    delta_R = F_RR^+ F_RD theta_D,    cost = 1/2 delta^T F delta,  delta_D = -theta_D.
-Weights: D = one scalar, R = a block of its output row (including the row bias), or empty.
-Neurons: D = the neuron's outgoing weights, R = all other outgoing weights + next bias.
-Our methods choose on valA, stop on valB, and count parameters after canonicalisation.
-"""
+"""Berman, Classic, and Fisher General on SimpleNN/MNIST."""
 from __future__ import annotations
 
 import argparse
 import gzip
-import json
 import math
 import os
 import struct
@@ -30,6 +21,9 @@ sys.path.insert(0, str(ROOT / "NNpruning"))
 from nnprune.canonicalize.mlp import (canonicalize_linear_chain,
                                       canonicalize_mlp_tensors)
 from nnprune.third_party.fdist_fim import calculate_fim_backprop
+from nnprune.factorized_fisher import inverse_diagonal
+from result_artifacts import write_json as save
+from sparsegpt import sparsegpt_matrix
 
 DATA = ROOT / "native_baselines" / "cache" / "berman" / "mnist"
 CHECKPOINT = ROOT / "checkpoints" / "berman" / "simplenn_mnist_official.pt"
@@ -108,13 +102,6 @@ def nonzero(net):
     return sum(int(torch.count_nonzero(p)) for p in net.parameters())
 
 
-def save(path, content):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(content, indent=2) + "\n")
-    os.replace(temporary, path)
-
-
 def evaluate_row(net, val, test, reference, total, started, step, device, **extra):
     val_loss = losses(net, val, device)
     delta, se = paired(val_loss, reference)
@@ -184,78 +171,6 @@ def run_berman(args, train, val_b, test, n_fisher):
         "stop_index": stop_index, "stopping_point": rows[stop_index], "history": rows})
 
 
-def run_berman_validated(args, train, val_a, val_b, test):
-    net = model(args.device)
-    total = sum(p.numel() for p in net.parameters())
-    ref_b = losses(net, val_b, args.device)
-    base = float(ref_b.mean())
-    fisher_data = loader(fisher_images(train, args.fisher_n), 128)
-    started = time.perf_counter()
-    rows = [evaluate_row(net, val_b, test, ref_b, total, started, 0, args.device)]
-    stop_index, rejected, termination_reason = None, None, "schedule_complete"
-    for step in range(1, min(10, args.max_steps) + 1):
-        diag = calculate_fim_backprop(net, fisher_data, device=str(args.device)).to(args.device)
-        params = list(net.parameters())
-        flat_theta = torch.cat([parameter.detach().flatten() for parameter in params])
-        score = diag.clamp_min(0).sqrt() * flat_theta.abs()
-        score = score.masked_fill(flat_theta == 0, torch.inf)
-        count = round(step / 10 * total) - (total - nonzero(net))
-        ranked = torch.argsort(score)
-        chunks = [chunk for chunk in ranked.split(count)[:args.berman_candidate_pool]
-                  if len(chunk) == count and torch.isfinite(score[chunk]).all()]
-        if not chunks:
-            termination_reason = "candidate_exhaustion"
-            break
-        state, evaluated = snapshot(net), []
-        for chunk in chunks:
-            mask = torch.ones_like(flat_theta)
-            mask[chunk] = 0
-            offset = 0
-            for parameter in params:
-                parameter.mul_(mask[offset:offset + parameter.numel()].view_as(parameter))
-                offset += parameter.numel()
-            evaluated.append((chunk, losses(net, val_a, args.device)))
-            net.load_state_dict(state)
-        best = min(evaluated, key=lambda item: float(item[1].mean()))[1]
-        ties = [item for item in evaluated
-                if paired(item[1], best)[0] <= args.n_sigma * paired(item[1], best)[1]]
-        chosen, chosen_loss = min(ties, key=lambda item: float(item[1].mean()))
-        flat = torch.cat([parameter.flatten() for parameter in params])
-        flat[chosen] = 0
-        offset = 0
-        for parameter in params:
-            parameter.copy_(flat[offset:offset + parameter.numel()].view_as(parameter))
-            offset += parameter.numel()
-        delta, se = paired(losses(net, val_b, args.device), ref_b)
-        extra = {"kind": "berman_validated", "move": f"berman_chunk:{len(chosen)}",
-                 "actual_savings": len(chosen), "val_a_loss": float(chosen_loss.mean()),
-                 "n_candidates": len(evaluated), "n_ties": len(ties)}
-        if delta > args.n_sigma * se + args.rho * base:
-            termination_reason = "stop_rule"
-            stop_index = len(rows) - 1
-            rejected = {**extra, "removed": total - nonzero(net),
-                        "val_delta": delta, "val_se": se}
-            net.load_state_dict(state)
-            break
-        rows.append(evaluate_row(net, val_b, test, ref_b, total, started, step,
-                                 args.device, **extra))
-        print(f"berman_validated {step}: removed {rows[-1]['frac_removed']:.1%}, "
-              f"val {rows[-1]['val_loss']:.4f}", flush=True)
-    save(RESULTS / "berman_validated.json", {
-        **COMMON, "status": "complete", "method": "berman_validated",
-        "termination_reason": termination_reason,
-        "protocol": protocol(args, fisher_subset=args.fisher_n, grid="10%",
-                             candidate_pool=args.berman_candidate_pool,
-                             candidate_selection="held-out valA loss"),
-        "stop_index": stop_index if stop_index is not None else len(rows) - 1,
-        "stopping_point": rows[-1], "rejected_candidate": rejected,
-        "history": rows, "selections": rows[1:]})
-
-
-# --------------------------------------------------------------------------
-# Fisher geometry.  theta of a layer = [W | b], shape [out, in + 1], flattened row-major.
-# --------------------------------------------------------------------------
-
 def theta_of(linear):
     return torch.cat((linear.weight, linear.bias[:, None]), 1).double()
 
@@ -265,38 +180,6 @@ def set_theta(linear, theta):
     linear.bias.copy_(theta[:, -1])
 
 
-def schur(fisher, theta, deleted):
-    remaining = (theta != 0) & (fisher.diagonal(dim1=-2, dim2=-1) > 0) & ~deleted
-    block = fisher * remaining[..., :, None] * remaining[..., None, :]
-    rhs = (fisher @ (theta * deleted)[..., None])[..., 0] * remaining
-    delta = (torch.linalg.pinv(block, hermitian=True) @ rhs[..., None])[..., 0]
-    delta -= theta * deleted
-    cost = .5 * (delta[..., None, :] @ fisher @ delta[..., None])[..., 0, 0]
-    return delta, cost.clamp_min(0)
-
-
-def schur_invertible(fisher, theta, deleted):
-    active = (theta != 0) & (fisher.diagonal() > 0)
-    local = fisher[active][:, active]
-    eigenvalues, eigenvectors = torch.linalg.eigh((local + local.T) / 2)
-    cutoff = eigenvalues[-1].clamp_min(0) * len(eigenvalues) * torch.finfo(
-        eigenvalues.dtype).eps
-    if eigenvalues[0] <= cutoff:
-        raise RuntimeError("singular Fisher block: use schur()")
-    inverse = torch.zeros_like(fisher)
-    inverse[active[:, None] & active[None, :]] = (
-        (eigenvectors / eigenvalues) @ eigenvectors.T).flatten()
-    solutions = []
-    for mask in deleted:
-        on = mask & active
-        delta = -inverse[:, on] @ torch.linalg.solve(
-            inverse[on][:, on], theta[on])
-        solutions.append(torch.where(mask, -theta, delta))
-    delta = torch.stack(solutions)
-    return delta, (.5 * ((delta @ fisher) * delta).sum(1)).clamp_min(0)
-
-
-@torch.inference_mode()
 def fisher_factors(net, x):
     """Inputs A_l = [a_l, 1] of each linear layer and rows g_l[x, c] = sqrt(p_c)(e_c - p)^T dz/dpre_l.
     F of layer l = mean_x sum_c (g a^T)(g a^T)^T, since sum_c p_c (e_c - p)(e_c - p)^T = diag p - p p^T."""
@@ -315,248 +198,91 @@ def fisher_factors(net, x):
     return [torch.cat((a, ones), 1) for a in (a0, a1, a2)], [g0, g1, g2]
 
 
-def singleton_solutions(gram, theta, live):
-    """Minimum-norm constrained solutions for deleting each coordinate of small Fisher blocks."""
-    masked = gram * live[:, :, None] * live[:, None, :]
-    rtol = torch.finfo(torch.float32).eps * max(gram.shape[-1], 1)
-    inverse = torch.linalg.pinv(masked, rtol=rtol, hermitian=True)
-    projection = (inverse @ masked)
-    projection = (projection + projection.transpose(1, 2)) / 2
-    null = torch.eye(gram.shape[-1], dtype=gram.dtype,
-                     device=gram.device)[None] - projection
-    null_diag = null.diagonal(dim1=1, dim2=2)
-    inverse_diag = inverse.diagonal(dim1=1, dim2=2)
-    zero = null_diag > rtol
-    directions = torch.where(
-        zero[:, :, None],
-        null.transpose(1, 2) / null_diag.clamp_min(rtol)[:, :, None],
-        inverse.transpose(1, 2) /
-        inverse_diag.clamp_min(torch.finfo(gram.dtype).eps)[:, :, None])
-    delta = -theta[:, :, None] * directions
-    ids = torch.arange(gram.shape[-1], device=gram.device)
-    delta[:, ids, ids] = -theta
-    cost = .5 * torch.einsum("okp,opq,okq->ok", delta, gram, delta)
-    return delta, cost.clamp_min(0).masked_fill(~live, torch.inf), rtol
+@torch.inference_mode()
+def run_fisher_sparsegpt(args, train, val_b, test):
+    started = time.perf_counter()
+    reference_net = model(args.device)
+    reference = losses(reference_net, val_b, args.device)
+    total = sum(p.numel() for p in reference_net.parameters())
+    calibration = loader(fisher_images(train, args.fisher_n), 128)
+    factors = [torch.zeros((layer.out_features, layer.out_features),
+                           device=args.device, dtype=torch.float64)
+               for layer in linears(reference_net)]
+    observations = 0
+    for images, _ in calibration:
+        _, gradients = fisher_factors(reference_net, images.to(args.device))
+        for factor, gradient in zip(factors, gradients):
+            factor.add_(torch.einsum("nci,ncj->ij", gradient, gradient))
+        observations += len(images)
+    for factor in factors:
+        factor.div_(observations)
+        factor.diagonal().add_(args.sparsegpt_b_damp * max(
+            float(factor.diag().mean()), torch.finfo(factor.dtype).eps))
+    inverse_diagonals = [inverse_diagonal(factor) for factor in factors]
+    rows = [evaluate_row(reference_net, val_b, test, reference, total, started, 0, args.device)]
+    module_records, rejected = [], None
+    termination = "targets_exhausted"
+    destination = RESULTS / "fisher_sparsegpt.json"
 
+    def record(status):
+        save(destination, {
+            **COMMON, "status": status, "method": "fisher_sparsegpt",
+            "termination_reason": termination,
+            "protocol": protocol(
+                args, fisher_subset=args.fisher_n,
+                fisher_type="class-marginal AXB K-FAC",
+                B="frozen original-model class-marginal downstream factor",
+                A="current upstream activations, refreshed before each linear module",
+                compensation="SparseGPT later-column propagation; generalized OBS AXB ranking",
+                biases="fixed; post hoc canonicalization may remove redundant parameters",
+                targets=args.sparsegpt_targets, percdamp=args.sparsegpt_percdamp,
+                b_damp_ratio=args.sparsegpt_b_damp, blocksize=args.sparsegpt_blocksize),
+            "stop_index": len(rows) - 1, "stopping_point": rows[-1],
+            "rejected_candidate": rejected, "history": rows,
+            "module_records": module_records})
 
-def unit_compensations(activations, jacobian, outgoing, bias, units, max_iter=128):
-    """Solve all neuron compensation systems with the full Fisher operator, without forming F."""
-    x = torch.cat((activations[:, units],
-                   torch.ones(len(activations), 1, dtype=activations.dtype,
-                              device=activations.device)), 1).double()
-    j = jacobian.double()
-    v = outgoing[:, units].double()
-    candidates, n, classes = len(units), len(x), j.shape[1]
-    mask = torch.ones(candidates, v.shape[0], x.shape[1], dtype=torch.bool,
-                      device=x.device)
-    ids = torch.arange(candidates, device=x.device)
-    mask[ids, :, ids] = False
-    mask[:, :, :-1] &= (v != 0)[None]
-    mask[:, :, -1] &= (bias != 0)[None]
-    target = x[:, :-1].T[:, :, None] * torch.einsum("ncr,rk->knc", j, v)
-
-    def operator(value):
-        value = value * mask
-        preactivation = torch.einsum("nm,krm->knr", x, value)
-        effect = torch.einsum("ncr,knr->knc", j, preactivation)
-        back = torch.einsum("ncr,knc->knr", j, effect)
-        return torch.einsum("knr,nm->krm", back, x) / n
-
-    target_back = torch.einsum("ncr,knc->knr", j, target)
-    rhs = torch.einsum("knr,nm->krm", target_back, x) / n
-    rhs *= mask
-    solution = torch.zeros_like(rhs)
-    residual = rhs.clone()
-    direction = residual.clone()
-    norm0 = residual.flatten(1).square().sum(1).clamp_min(
-        torch.finfo(residual.dtype).tiny)
-    residual_norm = norm0.clone()
-    tolerance = (torch.finfo(torch.float32).eps * max(x.shape[1] * v.shape[0], 1)) ** 2
-    iterations = 0
-    for iterations in range(1, max_iter + 1):
-        image = operator(direction)
-        denominator = (direction * image).flatten(1).sum(1)
-        active = residual_norm > norm0 * tolerance
-        safe = active & (denominator > torch.finfo(denominator.dtype).eps)
-        alpha = torch.where(safe, residual_norm / denominator, 0.)
-        solution += alpha[:, None, None] * direction
-        residual -= alpha[:, None, None] * image
-        new_norm = residual.flatten(1).square().sum(1)
-        if not bool((new_norm > norm0 * tolerance).any()):
-            residual_norm = new_norm
+    record("running")
+    for step, target in enumerate(args.sparsegpt_targets, 1):
+        net = model(args.device)
+        modules = []
+        for index, layer in enumerate(linears(net)):
+            a = torch.zeros((layer.in_features, layer.in_features),
+                            dtype=torch.float64, device=args.device)
+            for images, _ in calibration:
+                activation = images.to(args.device).flatten(1)
+                for upstream in linears(net)[:index]:
+                    activation = F.relu(upstream(activation))
+                a.add_(activation.double().T @ activation.double())
+            a.div_(observations)
+            before = layer.weight.detach().clone()
+            pruned, mask = sparsegpt_matrix(
+                before, a, target, args.sparsegpt_percdamp, args.sparsegpt_blocksize,
+                output_inverse_diagonal=inverse_diagonals[index])
+            layer.weight.copy_(pruned)
+            delta = (pruned - before).double()
+            modules.append({"layer": index, "masked_weights": int(mask.sum()),
+                            "predicted_fisher_damage": float(
+                                .5 * (delta * (factors[index] @ delta @ a)).sum())})
+        canonicalize(net)
+        row = evaluate_row(net, val_b, test, reference, total, started, step, args.device,
+                           kind="fisher_sparsegpt", target_sparsity=target)
+        admissible = row["val_delta"] <= args.n_sigma * row["val_se"] + args.rho * float(reference.mean())
+        row["admissible"] = admissible
+        module_records.append({"target": target, "modules": modules})
+        print(f"Fisher-aware SparseGPT {target:.0%}: removed {row['frac_removed']:.2%}, "
+              f"validation loss {row['val_loss']:.6f}, admissible={admissible}, "
+              f"elapsed {row['seconds']:.1f}s", flush=True)
+        if not admissible:
+            rejected = {**row, "relative_damage": row["val_delta"] / float(reference.mean())}
+            termination = "stop_rule"
             break
-        beta = torch.where(residual_norm > 0, new_norm / residual_norm, 0.)
-        direction = residual + beta[:, None, None] * direction
-        direction *= mask
-        residual_norm = new_norm
-    preactivation = torch.einsum("nm,krm->knr", x, solution)
-    repaired = torch.einsum("ncr,knr->knc", j, preactivation)
-    cost = .5 * (repaired - target).square().sum((1, 2)) / n
-    relative_residual = (residual_norm / norm0).sqrt()
-    return solution, cost, iterations, relative_residual
+        rows.append(row)
+        record("running")
+    record("complete")
+    from result_artifacts import update_plot
+    update_plot("berman")
 
 
-def spectral_group_solutions(fisher, theta, deleted):
-    active = theta != 0
-    local = (fisher[active][:, active] + fisher[active][:, active].T) / 2
-    eigenvalues, eigenvectors = torch.linalg.eigh(local)
-    rtol = torch.finfo(torch.float32).eps * local.shape[0]
-    keep = eigenvalues > eigenvalues[-1].clamp_min(0) * rtol
-    basis = eigenvectors[:, keep]
-    inverse_local = (basis / eigenvalues[keep]) @ basis.T
-    null_local = torch.eye(local.shape[0], dtype=local.dtype,
-                           device=local.device) - basis @ basis.T
-    inverse = torch.zeros_like(fisher)
-    null = torch.zeros_like(fisher)
-    active_block = active[:, None] & active[None, :]
-    inverse[active_block] = inverse_local.flatten()
-    null[active_block] = null_local.flatten()
-    solutions = []
-    for deletion in deleted:
-        on = deletion & active
-        target = -theta[on]
-        delta_null = null[:, on] @ torch.linalg.pinv(
-            null[on][:, on], rtol=rtol, hermitian=True) @ target
-        residual = target - delta_null[on]
-        delta_range = inverse[:, on] @ torch.linalg.pinv(
-            inverse[on][:, on], rtol=rtol, hermitian=True) @ residual
-        delta = delta_null + delta_range
-        delta[on] = target
-        solutions.append(delta)
-    delta = torch.stack(solutions)
-    cost = .5 * ((delta @ fisher) * delta).sum(1)
-    return delta, cost.clamp_min(0), int(keep.sum())
-
-
-@torch.inference_mode()
-def weight_fisher_candidates(net, A, G, per_family, block_size):
-    """One candidate per scalar.  R is its live row block; the row bias is in every weight block."""
-    out = []
-    for layer, (linear, a, g) in enumerate(zip(linears(net), A, G)):
-        q = g.square().sum(1)
-        layer_candidates = []
-        for start in range(0, linear.in_features, block_size):
-            stop = min(start + block_size, linear.in_features)
-            features = torch.cat((a[:, start:stop], a[:, -1:]), 1)
-            theta = torch.cat((linear.weight[:, start:stop],
-                               linear.bias[:, None]), 1).double()
-            live = theta != 0
-            gram = torch.einsum("xo,xi,xj->oij", q, features, features) / len(a)
-            delta, cost, rtol = singleton_solutions(gram, theta, live)
-            width = stop - start
-            candidate_columns = width
-            flat_cost = cost[:, :candidate_columns]
-            for flat in torch.argsort(flat_cost.flatten())[:per_family].tolist():
-                row, local = divmod(flat, candidate_columns)
-                if not torch.isfinite(flat_cost[row, local]):
-                    continue
-                d = delta[row, local]
-                direct = (.5 * torch.dot(d, gram[row] @ d)).clamp_min(0)
-                if not torch.isclose(direct, flat_cost[row, local], rtol=1e-8, atol=1e-12):
-                    raise RuntimeError("scalar Fisher cost does not match its parameter update")
-                column = start + local
-                def apply(net, layer=layer, row=row, start=start, stop=stop,
-                          column=column, d=d):
-                    linear = linears(net)[layer]
-                    linear.weight[row, start:stop].add_(d[:stop - start].to(linear.weight))
-                    linear.bias[row].add_(d[-1].to(linear.bias))
-                    linear.weight[row, column] = 0
-                c = float(direct)
-                layer_candidates.append({
-                    "kind": "weight_fisher",
-                    "label": f"weight_fisher:L{layer}:w{row},{column}",
-                    "apply": apply, "fisher_cost": c,
-                    "fisher_cost_per_removed": c,
-                    "fisher_rank": int(torch.linalg.matrix_rank(gram[row], rtol=rtol))})
-        out.extend(sorted(layer_candidates,
-                          key=lambda candidate: candidate["fisher_cost_per_removed"])
-                   [:per_family])
-    return out
-
-
-@torch.inference_mode()
-def unit_fisher_candidates(net, A, G, per_family, compensate=True):
-    """D = live outgoing weights of one neuron; R = all other live outgoing weights + next bias,
-    or R = empty (unit_zero) when compensate is False."""
-    out = []
-    for layer in (0, 1):
-        incoming, outgoing = linears(net)[layer], linears(net)[layer + 1]
-        a, g = A[layer + 1][:, :-1], G[layer + 1]
-        live = outgoing.weight != 0
-        units = live.any(0).nonzero().flatten()
-        if not units.numel():
-            continue
-        saved = (live[:, units].sum(0) + (incoming.weight[units] != 0).sum(1)
-                 + (incoming.bias[units] != 0)).double()
-        if compensate and layer == 0:
-            updates, cost, iteration_count, residual = unit_compensations(
-                a, g, outgoing.weight, outgoing.bias, units)
-            iterations = torch.full((len(units),), iteration_count, dtype=torch.long,
-                                    device=units.device)
-            tolerance = torch.finfo(torch.float32).eps * max(
-                a.shape[1] * outgoing.out_features, 1)
-            cost = cost.masked_fill(residual > tolerance, torch.inf)
-            rank = -1
-        elif compensate:
-            features = A[layer + 1]
-            theta = theta_of(outgoing).flatten()
-            design = (g[:, :, :, None] * features[:, None, None, :]).reshape(
-                -1, theta.numel())
-            fisher = design.T @ design / len(features)
-            deleted = torch.zeros(len(units), theta.numel(), dtype=torch.bool,
-                                  device=theta.device)
-            stride = features.shape[1]
-            rows = torch.arange(outgoing.out_features, device=theta.device)
-            for local, unit in enumerate(units):
-                deleted[local, rows * stride + unit] = live[:, unit]
-            deltas, cost, rank = spectral_group_solutions(fisher, theta, deleted)
-            direct = .5 * ((deltas @ fisher) * deltas).sum(1)
-            if not torch.allclose(cost, direct.clamp_min(0), rtol=1e-8, atol=1e-10):
-                raise RuntimeError("neuron Fisher cost does not match its parameter update")
-            residual = torch.zeros_like(cost)
-            iterations = torch.zeros_like(cost, dtype=torch.long)
-        else:
-            contribution = (a[:, units].T[:, :, None]
-                            * torch.einsum("ncr,rk->knc", g, outgoing.weight[:, units].double()))
-            cost = .5 * contribution.square().sum((1, 2)) / len(a)
-            iterations = torch.zeros_like(cost, dtype=torch.long)
-            residual = torch.ones_like(cost)
-            rank = 0
-        score = cost / saved
-        for j in score.argsort()[:per_family].tolist():
-            if not torch.isfinite(score[j]):
-                continue
-            i = int(units[j])
-            if compensate and layer == 1:
-                delta = deltas[j]
-                def apply(net, layer=layer, i=i, delta=delta):
-                    incoming, outgoing = linears(net)[layer], linears(net)[layer + 1]
-                    set_theta(outgoing, theta_of(outgoing) + delta.view_as(theta_of(outgoing)))
-                    outgoing.weight[:, i] = 0
-                    incoming.weight[i] = 0
-                    incoming.bias[i] = 0
-            else:
-                update = updates[j] if compensate else None
-                survivors = units
-                def apply(net, layer=layer, i=i, update=update, survivors=survivors):
-                    incoming, outgoing = linears(net)[layer], linears(net)[layer + 1]
-                    if update is not None:
-                        outgoing.weight[:, survivors] += update[:, :-1].to(outgoing.weight)
-                        outgoing.bias.add_(update[:, -1].to(outgoing.bias))
-                    outgoing.weight[:, i] = 0
-                    incoming.weight[i] = 0
-                    incoming.bias[i] = 0
-            kind = "unit_fisher" if compensate else "unit_zero"
-            out.append({"kind": kind, "label": f"{kind}:L{layer}:n{i}",
-                        "apply": apply, "fisher_cost": float(cost[j]),
-                        "fisher_cost_per_removed": float(score[j]),
-                        "fisher_rank": rank,
-                        "fisher_iterations": int(iterations[j]),
-                        "fisher_relative_residual": float(residual[j])})
-    return out
-
-
-@torch.inference_mode()
 def weight_zero_candidates(net, A, G, per_family):
     """One scalar deletion with no compensation, ranked by the exact Fisher diagonal."""
     out = []
@@ -578,19 +304,46 @@ def weight_zero_candidates(net, A, G, per_family):
 
 
 @torch.inference_mode()
+def _logic_and(model, terms, name):
+    if any(isinstance(term, int) and term == 0 for term in terms):
+        return 0
+    variables = [term for term in terms if not isinstance(term, int)]
+    if not variables:
+        return 1
+    if len(variables) == 1:
+        return variables[0]
+    result = model.addVar(vtype="B", name=name)
+    model.addGenConstrAnd(result, variables)
+    return result
+
+
+def _logic_or(model, terms, name):
+    if any(isinstance(term, int) and term == 1 for term in terms):
+        return 1
+    variables = [term for term in terms if not isinstance(term, int)]
+    if not variables:
+        return 0
+    if len(variables) == 1:
+        return variables[0]
+    result = model.addVar(vtype="B", name=name)
+    model.addGenConstrOr(result, variables)
+    return result
+
+
+@torch.inference_mode()
 def fisher_general_candidates(net, A, G, args):
+    try:
+        import gurobipy as gp
+    except ImportError as error:
+        raise RuntimeError("Fisher General requires gurobipy") from error
+
     matrices = [theta_of(linear) for linear in linears(net)]
-    sizes = [value.numel() for value in matrices]
     offsets = [0]
-    for size in sizes:
-        offsets.append(offsets[-1] + size)
-    theta = torch.cat([value.flatten() for value in matrices])
+    for matrix in matrices:
+        offsets.append(offsets[-1] + matrix.numel())
+    theta = torch.cat([matrix.flatten() for matrix in matrices])
     live = theta != 0
     n, classes = len(A[0]), G[0].shape[1]
-    diagonal = torch.cat([
-        torch.einsum("ncr,nf->rf", g.square(), a.square()).flatten() / n
-        for a, g in zip(A, G)])
-    closure_cache, target_cache = {}, {}
 
     def columns(indices):
         indices = torch.as_tensor(indices, device=theta.device, dtype=torch.long)
@@ -602,170 +355,215 @@ def fisher_general_candidates(net, A, G, args):
             local = indices[positions] - start
             width = matrices[layer].shape[1]
             rows, cols = torch.div(local, width, rounding_mode="floor"), local % width
-            block = G[layer][:, :, rows] * A[layer][:, None, cols]
-            result[:, positions] = block.reshape(n * classes, -1) / math.sqrt(n)
+            result[:, positions] = (
+                G[layer][:, :, rows] * A[layer][:, None, cols]
+            ).reshape(n * classes, -1) / math.sqrt(n)
         return result
 
+    def closure_details(deleted):
+        values = [matrix.clone() for matrix in matrices]
+        for layer, (start, stop) in enumerate(zip(offsets, offsets[1:])):
+            local = torch.tensor([index - start for index in deleted
+                                  if start <= index < stop], device=theta.device)
+            if local.numel():
+                values[layer].view(-1)[local] = 0
+        canonicalize_mlp_tensors([value[:, :-1] for value in values],
+                                 [value[:, -1] for value in values],
+                                 (F.relu, F.relu))
+        survivor = torch.cat([(value != 0).flatten() for value in values])
+        removed = set((live & ~survivor).nonzero().flatten().tolist())
+        return len(removed), removed
+
     def closure(deleted):
-        deleted = tuple(sorted(set(deleted)))
-        if deleted not in closure_cache:
-            values = [matrix.clone() for matrix in matrices]
-            ids = torch.tensor(deleted, device=theta.device)
-            for layer, (start, stop) in enumerate(zip(offsets, offsets[1:])):
-                local = ids[(ids >= start) & (ids < stop)] - start
-                if local.numel():
-                    values[layer].view(-1)[local] = 0
-            canonicalize_mlp_tensors(
-                [value[:, :-1] for value in values],
-                [value[:, -1] for value in values], (F.relu, F.relu))
-            survivor = torch.cat([(value != 0).flatten() for value in values])
-            closure_cache[deleted] = survivor, int(live.sum() - survivor.sum())
-        return closure_cache[deleted]
+        return closure_details(deleted)[0]
 
-    def fit(deleted, updated=()):
-        deleted = tuple(sorted(set(deleted)))
-        if not deleted:
-            return None
-        survivor, savings = closure(deleted)
-        updated = tuple(sorted(i for i in set(updated)
-                               if bool(survivor[i]) and i not in deleted))
-        if deleted not in target_cache:
-            ids = torch.tensor(deleted, device=theta.device)
-            target_cache[deleted] = columns(ids) @ theta[ids]
-        target = target_cache[deleted]
-        if updated:
-            z = columns(updated)
-            matrix = z.T @ z
-            if args.fisher_general_mu:
-                matrix.diagonal().add_(args.fisher_general_mu)
-            rhs = z.T @ target
-            factor, info = torch.linalg.cholesky_ex(matrix)
-            if int(info) == 0:
-                delta = torch.cholesky_solve(rhs[:, None], factor).squeeze(1)
-            else:
-                rtol = torch.finfo(torch.float32).eps * len(updated)
-                delta = torch.linalg.pinv(matrix, rtol=rtol, hermitian=True) @ rhs
-            residual = z @ delta - target
-        else:
-            delta = target.new_empty(0)
-            residual = -target
-        damage = .5 * residual.square().sum()
-        objective = (damage + args.fisher_general_lambda_u * len(updated)
-                     + .5 * args.fisher_general_mu * delta.square().sum()
-                     - args.fisher_general_lambda_d * savings)
-        return {"deleted": deleted, "updated": updated, "delta": delta,
-                "damage": float(damage), "objective": float(objective),
-                "savings": savings, "residual": residual}
-
+    diagonal = torch.cat([
+        torch.einsum("ncr,nf->rf", g.square(), a.square()).flatten() / n
+        for a, g in zip(A, G)])
     weight_ids = []
     for layer, linear in enumerate(linears(net)):
         width = linear.in_features + 1
-        row = torch.arange(linear.out_features, device=theta.device)[:, None]
-        col = torch.arange(linear.in_features, device=theta.device)[None]
-        ids = offsets[layer] + row * width + col
+        rows = torch.arange(linear.out_features, device=theta.device)[:, None]
+        cols = torch.arange(linear.in_features, device=theta.device)[None]
+        ids = offsets[layer] + rows * width + cols
         weight_ids.append(ids[linear.weight != 0])
     weight_ids = torch.cat(weight_ids)
-    scalar_cost = .5 * theta[weight_ids].square() * diagonal[weight_ids]
-    scalar_ids = weight_ids[torch.argsort(scalar_cost)]
-    atoms = [tuple(chunk.tolist()) for chunk in scalar_ids.split(
-        args.fisher_general_window)[:args.fisher_general_pool] if chunk.numel()]
-    atoms.extend((int(index),) for index in scalar_ids[:args.fisher_general_pool])
+    order = weight_ids[torch.argsort(.5 * theta[weight_ids].square() * diagonal[weight_ids])]
 
     groups = []
     for layer in (0, 1):
         outgoing = linears(net)[layer + 1]
-        stride = outgoing.in_features + 1
+        width = outgoing.in_features + 1
         for unit in (outgoing.weight != 0).any(0).nonzero().flatten().tolist():
             rows = (outgoing.weight[:, unit] != 0).nonzero().flatten()
-            group = tuple((offsets[layer + 1] + rows * stride + unit).tolist())
-            candidate = fit(group)
-            groups.append((candidate["objective"] / max(candidate["savings"], 1), group))
+            group = tuple((offsets[layer + 1] + rows * width + unit).tolist())
+            if len(group) > args.fisher_general_max_group:
+                continue
+            raw = float((.5 * theta[list(group)].square() * diagonal[list(group)]).sum())
+            groups.append((raw / max(closure(group), 1), group))
     groups.sort(key=lambda item: item[0])
-    atoms.extend(group for _, group in groups[:args.fisher_general_pool])
-    atoms = list(dict.fromkeys(atoms))
-    initial_fits = [fit(atom) for atom in atoms]
-    initial_fits = [item for item in initial_fits
-                    if item["savings"] >= args.fisher_general_min_savings]
-    starts = sorted(initial_fits, key=lambda item: item["objective"])
-    starts = starts[:args.fisher_general_starts]
+    structural_blocks = [group for _, group in groups[:args.fisher_general_group_pool]]
+    structural_closures = [closure_details(group)[1] for group in structural_blocks]
+    reserved = (set().union(*structural_closures) if structural_closures else set())
+    guards = set()
+    for layer in (0, 1):
+        incoming = linears(net)[layer]
+        incoming_width = incoming.in_features + 1
+        for unit in (incoming.weight != 0).any(1).nonzero().flatten().tolist():
+            ids = [offsets[layer] + unit * incoming_width + source
+                   for source in (incoming.weight[unit] != 0).nonzero().flatten().tolist()]
+            available = [index for index in ids if index not in reserved]
+            if available:
+                guards.add(available[-1])
+        outgoing = linears(net)[layer + 1]
+        width = outgoing.in_features + 1
+        for unit in (outgoing.weight != 0).any(0).nonzero().flatten().tolist():
+            ids = [offsets[layer + 1] + row * width + unit
+                   for row in (outgoing.weight[:, unit] != 0).nonzero().flatten().tolist()]
+            available = [index for index in ids if index not in reserved]
+            if available:
+                guards.add(available[-1])
+    scalar_ids = [int(index) for index in order
+                  if int(index) not in reserved and int(index) not in guards]
+    scalar_blocks = [tuple(block) for block in
+                     (scalar_ids[start:start + args.fisher_general_window]
+                      for start in range(0, len(scalar_ids), args.fisher_general_window))
+                     if block][:args.fisher_general_pool]
+    blocks = scalar_blocks + structural_blocks
+    if not blocks:
+        return []
+    block_savings = [len(block) for block in scalar_blocks]
+    block_savings += [closure(block) for block in structural_blocks]
+    deletion_pool = set().union(*map(set, blocks))
 
-    def correlations(residual):
-        shaped = residual.reshape(n, classes)
-        return torch.cat([
-            (torch.einsum("ncr,nc,nf->rf", g, shaped, a) / math.sqrt(n)).flatten()
-            for a, g in zip(A, G)])
+    target = sum((columns(block) @ theta[list(block)] for block in blocks),
+                 theta.new_zeros(n * classes))
+    live_ids = live.nonzero().flatten()
+    scale = (diagonal + args.fisher_general_mu).sqrt().clamp_min(1e-15)
+    score = (columns(live_ids).T @ target).abs()
+    ranked_updates = live_ids[torch.argsort(score / scale[live_ids], descending=True)]
+    update_ids = tuple(int(index) for index in ranked_updates
+                       if int(index) not in deletion_pool and int(index) not in reserved
+                       )[:args.fisher_general_pool]
+    block_effects = torch.stack([-(columns(block) @ theta[list(block)])
+                                 for block in blocks], 1)
+    update_design = columns(update_ids)
+    design = torch.cat((block_effects, update_design), 1)
+    q = design.T @ design
+    q = (q + q.T) / 2
+    eigenvalues, eigenvectors = torch.linalg.eigh(q)
+    q = (eigenvectors * eigenvalues.clamp_min(0)) @ eigenvectors.T
 
-    found = {(item["deleted"], item["updated"]): item for item in initial_fits}
-    for initial in starts:
-        current = initial
-        for _ in range(args.fisher_general_iters):
-            alternatives = []
-            for atom in atoms:
-                deletion = tuple(sorted(set(current["deleted"]).union(atom)))
-                if deletion != current["deleted"]:
-                    alternatives.append(fit(deletion, current["updated"]))
-            restore = sorted(current["deleted"],
-                             key=lambda index: float(theta[index].square() * diagonal[index]),
-                             reverse=True)[:args.fisher_general_update_pool]
-            alternatives.extend(
-                fit(tuple(index for index in current["deleted"] if index != restored),
-                    current["updated"])
-                for restored in restore if len(current["deleted"]) > 1)
-            survivor, _ = closure(current["deleted"])
-            available = survivor.clone()
-            available[torch.tensor(current["deleted"], device=theta.device)] = False
-            if current["updated"]:
-                available[torch.tensor(current["updated"], device=theta.device)] = False
-            available_ids = available.nonzero().flatten()
-            if available_ids.numel():
-                score = correlations(current["residual"])[available_ids].abs()
-                scale = (diagonal[available_ids] + args.fisher_general_mu).sqrt().clamp_min(1e-15)
-                additions = available_ids[torch.argsort(score / scale, descending=True)
-                                          [:args.fisher_general_update_pool]]
-                alternatives.extend(fit(current["deleted"],
-                                        current["updated"] + (int(index),))
-                                    for index in additions)
-            alternatives.extend(fit(current["deleted"],
-                                    tuple(index for index in current["updated"]
-                                          if index != removed))
-                                for removed in current["updated"])
-            alternatives = [candidate for candidate in alternatives if candidate is not None]
-            if not alternatives:
-                break
-            best = min(alternatives, key=lambda item: item["objective"])
-            if best["objective"] >= current["objective"] - 1e-14:
-                break
-            current = best
-            found[(current["deleted"], current["updated"])] = current
-        found[(current["deleted"], current["updated"])] = current
+    solver = gp.Model("fisher_general")
+    solver.Params.OutputFlag = int(args.fisher_general_log)
+    solver.Params.TimeLimit = args.fisher_general_time_limit
+    solver.Params.MIPGap = args.fisher_general_gap
+    solver.Params.NonConvex = 0
+    selected = [solver.addVar(vtype=gp.GRB.BINARY, name=f"block_{index}")
+                for index in range(len(blocks))]
 
-    proposals = []
-    for candidate in sorted(found.values(), key=lambda item: item["objective"]):
-        if (candidate["objective"] >= 0
-                or candidate["savings"] < args.fisher_general_min_savings):
-            continue
-        deleted = torch.tensor(candidate["deleted"], device=theta.device)
-        updated = torch.tensor(candidate["updated"], device=theta.device)
-        delta = candidate["delta"]
+    median = float(theta[live].abs().median())
+    u, c, bounds = [], [], []
+    for index in update_ids:
+        uv = solver.addVar(vtype=gp.GRB.BINARY, name=f"u_{index}")
+        bound = args.fisher_general_bound * max(abs(float(theta[index])), median, 1e-6)
+        cv = solver.addVar(lb=-bound, ub=bound, name=f"c_{index}")
+        solver.addGenConstrIndicator(uv, 0, cv == 0.)
+        u.append(uv)
+        c.append(cv)
+        bounds.append(bound)
 
-        def apply(net, deleted=deleted, updated=updated, delta=delta):
-            values = torch.cat([theta_of(linear).flatten() for linear in linears(net)])
-            if updated.numel():
-                values[updated] += delta
-            values[deleted] = 0
-            for layer, (start, stop) in enumerate(zip(offsets, offsets[1:])):
-                set_theta(linears(net)[layer], values[start:stop].reshape_as(matrices[layer]))
+    savings = gp.quicksum(value * reward
+                              for value, reward in zip(selected, block_savings))
 
-        proposals.append({
-            "kind": "fisher_general",
-            "label": (f"fisher_general:D{len(deleted)}:U{len(updated)}:"
-                      f"K{candidate['savings']}"),
-            "apply": apply, "fisher_cost": candidate["damage"],
-            "fisher_cost_per_removed": candidate["damage"] / candidate["savings"],
-            "search_objective": candidate["objective"],
-            "explicit_deletions": len(deleted), "compensating_updates": len(updated),
-            "predicted_savings": candidate["savings"]})
-    return proposals
+    objective_scale = max(float(q.diag().max()), args.fisher_general_mu,
+                          args.fisher_general_lambda_u,
+                          args.fisher_general_lambda_d, 1e-12)
+    variables = selected + c
+    objective = gp.QuadExpr()
+    for row in range(len(variables)):
+        for column in range(len(variables)):
+            coefficient = .5 * float(q[row, column]) / objective_scale
+            if coefficient:
+                objective += coefficient * variables[row] * variables[column]
+    for uv, cv in zip(u, c):
+        objective += (.5 * args.fisher_general_mu / objective_scale) * cv * cv
+        objective += (args.fisher_general_lambda_u / objective_scale) * uv
+    objective -= (args.fisher_general_lambda_d / objective_scale) * savings
+    solver.setObjective(objective, gp.GRB.MINIMIZE)
+    solver.addConstr(gp.quicksum(selected) >= 1)
+
+    for index, variable in enumerate(selected):
+        variable.Start = int(index == 0)
+    for variable, compensation in zip(u, c):
+        variable.Start = 0
+        compensation.Start = 0.
+    solver.update()
+    if args.fisher_general_log:
+        print(f"MIQP size: {solver.NumVars} variables, {solver.NumConstrs} constraints, "
+              f"{solver.NumNZs} nonzeros", flush=True)
+    solver.optimize()
+    if solver.SolCount == 0:
+        status = solver.Status
+        solver.dispose()
+        raise RuntimeError(f"Gurobi found no feasible solution (status {status})")
+
+    chosen_blocks = tuple(index for index, variable in enumerate(selected) if variable.X > .5)
+    deleted = tuple(sorted(set().union(*(set(blocks[index]) for index in chosen_blocks))))
+    updated = tuple(index for position, index in enumerate(update_ids) if u[position].X > .5)
+    compensation = torch.tensor([c[update_ids.index(index)].X for index in updated],
+                                dtype=theta.dtype, device=theta.device)
+    effect = block_effects[:, list(chosen_blocks)].sum(1)
+    if updated:
+        effect += columns(updated) @ compensation
+    damage = float(.5 * effect.square().sum())
+    actual_savings = closure(deleted)
+    direct_objective = (damage + .5 * args.fisher_general_mu * float(compensation.square().sum())
+                        + args.fisher_general_lambda_u * len(updated)
+                        - args.fisher_general_lambda_d * actual_savings)
+    solver_objective = solver.ObjVal * objective_scale
+    modeled_savings = round(float(savings.getValue()))
+    if modeled_savings != actual_savings:
+        solver.dispose()
+        raise RuntimeError("Gurobi canonicalization reward disagrees with the canonicalizer: "
+                           f"modeled {modeled_savings}, actual {actual_savings}, "
+                           f"blocks {chosen_blocks}")
+    tolerance = 1e-7 * max(1., abs(direct_objective), abs(solver_objective))
+    if abs(direct_objective - solver_objective) > tolerance:
+        solver.dispose()
+        raise RuntimeError("Gurobi objective disagrees with direct Fisher evaluation")
+
+    gap = float(solver.MIPGap)
+    runtime = float(solver.Runtime)
+    status = int(solver.Status)
+    bound_active = any(abs(c[update_ids.index(index)].X) >=
+                       .999 * bounds[update_ids.index(index)] for index in updated)
+    solver.dispose()
+    deleted_tensor = torch.tensor(deleted, device=theta.device)
+    updated_tensor = torch.tensor(updated, device=theta.device)
+
+    def apply(net):
+        values = torch.cat([theta_of(linear).flatten() for linear in linears(net)])
+        if updated_tensor.numel():
+            values[updated_tensor] += compensation
+        values[deleted_tensor] = 0
+        for layer, (start, stop) in enumerate(zip(offsets, offsets[1:])):
+            set_theta(linears(net)[layer], values[start:stop].reshape_as(matrices[layer]))
+
+    return [{
+        "kind": "fisher_general",
+        "label": (f"fisher_general:B{len(chosen_blocks)}:D{len(deleted)}:"
+                  f"U{len(updated)}:K{actual_savings}"),
+        "apply": apply, "fisher_cost": damage,
+        "fisher_cost_per_removed": damage / actual_savings,
+        "search_objective": direct_objective,
+        "explicit_deletions": len(deleted), "compensating_updates": len(updated),
+        "predicted_savings": actual_savings, "solver_objective": solver_objective,
+        "solver_status": status, "solver_gap": gap, "solver_seconds": runtime,
+        "compensation_bound_active": bound_active,
+        "candidate_blocks": len(blocks), "candidate_deletions": len(deletion_pool),
+        "candidate_updates": len(update_ids),
+    }]
 
 
 # --------------------------------------------------------------------------
@@ -824,7 +622,7 @@ def unit_move(kind, layer, i, target=-1, alpha=0., c=0.):
 
 
 # --------------------------------------------------------------------------
-# Greedy path shared by classic and Fisher
+# Greedy path shared by Classic and Fisher General
 # --------------------------------------------------------------------------
 
 @torch.inference_mode()
@@ -836,12 +634,9 @@ def snapshot(net):
     return {k: v.detach().clone() for k, v in net.state_dict().items()}
 
 
-MOVES = {"classic": ["unit_off", "unit_mean", "unit_merge"],
-         "classic_weights": ["unit_off", "unit_mean", "unit_merge", "weight_zero"],
-         "fisher": ["unit_fisher", "weight_fisher"],
-         "fisher_original": ["unit_fisher", "weight_fisher"],
-         "fisher_general": ["fisher_general"],
-         "fisher_general_score": ["fisher_general"]}
+MOVES = {"classic": ("unit_off", "unit_mean", "unit_merge"),
+         "classic_weights": ("unit_off", "unit_mean", "unit_merge", "weight_zero"),
+         "fisher_general": ("fisher_general",)}
 
 
 def run_greedy(args, method, train, val_a, val_b, test):
@@ -851,7 +646,6 @@ def run_greedy(args, method, train, val_a, val_b, test):
     base = float(ref_b.mean())
     x_fisher = fisher_images(train, args.fisher_n)[0].to(args.device)
     x_stats = train[0][:4096].to(args.device)
-    original_factors = fisher_factors(net, x_fisher) if method == "fisher_original" else None
     started = time.perf_counter()
     rows = [evaluate_row(net, val_b, test, ref_b, total, started, 0, args.device)]
     stop_index, rejected, termination_reason = None, None, "max_steps"
@@ -861,26 +655,21 @@ def run_greedy(args, method, train, val_a, val_b, test):
         "termination_reason": termination_reason,
         "protocol": protocol(args, fisher_subset=args.fisher_n,
                              per_family=args.per_family,
-                             fisher_weight_block=args.fisher_weight_block,
                              fisher_type="exact class-marginal model Fisher",
-                             fisher_reference=("original checkpoint" if original_factors
-                                               is not None else "current model"),
-                             scalar_compensation="same output-row block plus bias",
-                             neuron_compensation="all surviving outgoing weights plus bias",
+                             fisher_reference="current model",
                              candidate_ranking="Fisher cost per parameter removed",
-                             candidate_selection=("search objective" if method ==
-                                                  "fisher_general_score" else
-                                                  "held-out valA loss"),
+                             candidate_selection="held-out valA loss",
                              fisher_general={
                                  "lambda_u": args.fisher_general_lambda_u,
                                  "lambda_d": args.fisher_general_lambda_d,
                                  "mu": args.fisher_general_mu,
-                                 "window": args.fisher_general_window,
-                                 "min_savings": args.fisher_general_min_savings,
                                  "pool": args.fisher_general_pool,
-                                 "starts": args.fisher_general_starts,
-                                 "iterations": args.fisher_general_iters,
-                                 "update_pool": args.fisher_general_update_pool},
+                                 "window": args.fisher_general_window,
+                                 "group_pool": args.fisher_general_group_pool,
+                                 "max_group": args.fisher_general_max_group,
+                                 "time_limit": args.fisher_general_time_limit,
+                                 "gap": args.fisher_general_gap,
+                                 "bound": args.fisher_general_bound},
                              moves=MOVES[method]),
         "stop_index": stop_index if stop_index is not None else len(rows) - 1,
         "stopping_point": rows[-1], "rejected_candidate": rejected, "history": rows,
@@ -888,44 +677,31 @@ def run_greedy(args, method, train, val_a, val_b, test):
         "move_counts": {k: sum(r.get("kind") == k for r in rows)
                         for k in sorted({r["kind"] for r in rows[1:]})}})
     for step in range(1, args.max_steps + 1):
-        needs_fisher = bool({"unit_fisher", "weight_fisher", "weight_zero",
-                             "fisher_general"} & set(MOVES[method]))
-        A, G = (original_factors or fisher_factors(net, x_fisher)) if needs_fisher else (None, None)
+        needs_fisher = bool({"weight_zero", "fisher_general"} & set(MOVES[method]))
+        A, G = fisher_factors(net, x_fisher) if needs_fisher else (None, None)
         proposals = []
-        if "unit_fisher" in MOVES[method]:
-            proposals += unit_fisher_candidates(net, A, G, args.per_family)
-        if "weight_fisher" in MOVES[method]:
-            proposals += weight_fisher_candidates(
-                net, A, G, args.per_family, args.fisher_weight_block)
         if "fisher_general" in MOVES[method]:
             proposals += fisher_general_candidates(net, A, G, args)
         if "unit_mean" in MOVES[method]:
             proposals += unit_classic_candidates(net, x_stats, args.per_family)
         if "weight_zero" in MOVES[method]:
             proposals += weight_zero_candidates(net, A, G, args.per_family)
-        score_only = method == "fisher_general_score"
         before, state, evaluated = nonzero(net), snapshot(net), []
         for proposal in proposals:
             proposal["apply"](net)
             canonicalize(net)
             saved = before - nonzero(net)
             if saved > 0:
-                candidate_loss = None if score_only else losses(net, val_a, args.device)
-                evaluated.append((proposal, candidate_loss, saved))
+                evaluated.append((proposal, losses(net, val_a, args.device), saved))
             net.load_state_dict(state)
         if not evaluated:
             termination_reason = "candidate_exhaustion"
             break
-        if score_only:
-            chosen, _unused_loss, saved = min(
-                evaluated, key=lambda item: (item[0]["search_objective"], -item[2]))
-            ties = [(chosen, None, saved)]
-        else:
-            best = min(evaluated, key=lambda item: float(item[1].mean()))[1]
-            ties = [item for item in evaluated
-                    if paired(item[1], best)[0] <= args.n_sigma * paired(item[1], best)[1]]
-            chosen, chosen_loss, saved = min(
-                ties, key=lambda item: (-item[2], float(item[1].mean())))
+        best = min(evaluated, key=lambda item: float(item[1].mean()))[1]
+        ties = [item for item in evaluated
+                if paired(item[1], best)[0] <= args.n_sigma * paired(item[1], best)[1]]
+        chosen, chosen_loss, saved = min(
+            ties, key=lambda item: (-item[2], float(item[1].mean())))
         chosen["apply"](net)
         canonicalize(net)
         chosen_loss = losses(net, val_a, args.device)
@@ -933,9 +709,11 @@ def run_greedy(args, method, train, val_a, val_b, test):
         extra = {"kind": chosen["kind"], "move": chosen["label"], "actual_savings": saved,
                  "val_a_loss": float(chosen_loss.mean()), "n_candidates": len(evaluated),
                  "n_ties": len(ties)}
-        for key in ("fisher_cost", "fisher_cost_per_removed", "fisher_rank",
-                    "fisher_iterations", "fisher_relative_residual", "search_objective",
-                    "explicit_deletions", "compensating_updates", "predicted_savings"):
+        for key in ("fisher_cost", "fisher_cost_per_removed", "search_objective",
+                    "explicit_deletions", "compensating_updates", "predicted_savings",
+                    "solver_objective", "solver_status", "solver_gap", "solver_seconds",
+                    "compensation_bound_active", "candidate_deletions",
+                    "candidate_updates", "candidate_blocks"):
             if key in chosen:
                 extra[key] = chosen[key]
         if delta > args.n_sigma * se + args.rho * base:
@@ -955,27 +733,37 @@ def run_greedy(args, method, train, val_a, val_b, test):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", choices=("berman", "berman_validated", *MOVES, "all"),
+    parser.add_argument("--method", choices=("berman", "fisher_sparsegpt", *MOVES, "all"),
                         default="all")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--threads", type=int, default=min(16, os.cpu_count() or 1))
     parser.add_argument("--rho", type=float, default=.05)
     parser.add_argument("--n-sigma", type=float, default=2.)
     parser.add_argument("--fisher-n", type=int, default=500)
-    parser.add_argument("--fisher-weight-block", type=int, default=64)
+    parser.add_argument("--sparsegpt-targets", default=".1,.2,.3,.4,.5,.6,.7,.8,.9")
+    parser.add_argument("--sparsegpt-blocksize", type=int, default=128)
+    parser.add_argument("--sparsegpt-percdamp", type=float, default=.01)
+    parser.add_argument("--sparsegpt-b-damp", type=float, default=1e-6)
     parser.add_argument("--per-family", type=int, default=4)
     parser.add_argument("--berman-candidate-pool", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=5000)
     parser.add_argument("--fisher-general-lambda-u", type=float, default=1e-8)
     parser.add_argument("--fisher-general-lambda-d", type=float, default=1e-7)
     parser.add_argument("--fisher-general-mu", type=float, default=1e-4)
-    parser.add_argument("--fisher-general-window", type=int, default=256)
-    parser.add_argument("--fisher-general-min-savings", type=int, default=32)
     parser.add_argument("--fisher-general-pool", type=int, default=8)
-    parser.add_argument("--fisher-general-starts", type=int, default=2)
-    parser.add_argument("--fisher-general-iters", type=int, default=4)
-    parser.add_argument("--fisher-general-update-pool", type=int, default=4)
+    parser.add_argument("--fisher-general-window", type=int, default=256)
+    parser.add_argument("--fisher-general-group-pool", type=int, default=1)
+    parser.add_argument("--fisher-general-max-group", type=int, default=16)
+    parser.add_argument("--fisher-general-time-limit", type=float, default=60.)
+    parser.add_argument("--fisher-general-gap", type=float, default=.01)
+    parser.add_argument("--fisher-general-bound", type=float, default=10.)
+    parser.add_argument("--fisher-general-log", action="store_true")
     args = parser.parse_args()
+    args.sparsegpt_targets = tuple(float(x) for x in args.sparsegpt_targets.split(","))
+    if (not args.sparsegpt_targets or any(not 0 < x < 1 for x in args.sparsegpt_targets)
+            or tuple(sorted(set(args.sparsegpt_targets))) != args.sparsegpt_targets
+            or args.sparsegpt_blocksize < 1 or min(args.sparsegpt_percdamp, args.sparsegpt_b_damp) < 0):
+        parser.error("invalid Fisher-aware SparseGPT settings")
     args.device = torch.device(args.device)
     torch.set_num_threads(args.threads)
     train, test_data = mnist()
@@ -985,8 +773,8 @@ def main():
                           loader(split(slice(5000, None)), 512))
     if args.method in ("berman", "all"):
         run_berman(args, train, val_b, test, args.fisher_n)
-    if args.method in ("berman_validated", "all"):
-        run_berman_validated(args, train, val_a, val_b, test)
+    if args.method == "fisher_sparsegpt":
+        run_fisher_sparsegpt(args, train, val_b, test)
     for method in MOVES:
         if args.method in (method, "all"):
             run_greedy(args, method, train, val_a, val_b, test)

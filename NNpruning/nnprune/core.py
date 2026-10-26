@@ -14,11 +14,9 @@ boundaries of softmax), and so on.  Limits are never stored as large numbers:
 every limit is realised by its exact representative (a constant folded into the
 downstream bias, a Heaviside unit, a fixed pattern).
 
-*Geometry proposes, data decides.*  Candidate moves are ranked by a local
-geometric prediction (diagonal GGN/Fisher for weights, downstream Fisher
-reconstruction for compensated deletions, and training loss for other structural
-moves), and the
-decision is taken on the VALIDATION set with a paired test:
+Candidate moves are ranked by a local prediction (diagonal GGN/Fisher for
+weights, a Fisher strategy, or training loss for classical structural moves).
+The default decision validates candidates with a paired test:
 
   admissible   mean(l(f_m) - l(f_0)) <= n_sigma * SE + tol_abs + tol_frac mean(l(f_0))
   tie set      mean(l(f_m) - l(f_m*))  <= n_sigma * SE                   m* = best admissible
@@ -47,6 +45,8 @@ import torch
 import torch.nn.functional as F
 from torch.func import grad, vmap
 from torch.utils.data import DataLoader, TensorDataset
+
+from .fisher import FisherStrategy, resolve_strategy
 
 ACTIVE, REMOVED, STEP = 0, 1, 2
 
@@ -87,10 +87,8 @@ class Move:
     pred_cost: float = float("nan")
 
     def describe(self) -> str:
-        if self.kind in ("fisher_general", "fisher_t"):
-            repair = (f"S={self.payload['active_directions']}"
-                      if self.kind == "fisher_t"
-                      else f"U={self.payload['n_updates']}")
+        if self.kind == "fisher":
+            repair = f"U={self.payload['n_updates']}"
             return (f"{self.kind}[{self.site}] D={self.payload['n_deleted']} "
                     f"{repair} K={self.payload['closure_savings']}")
         if self.kind == "zero":
@@ -272,24 +270,19 @@ class PruneConfig:
     n_struct: int = 32                   # structural moves proposed per step (cheapest by screen)
     n_merge: int = 16                    # merge pairs screened per layer
     step_per_unit: Optional[int] = None  # strongest first-layer features; None = all
-    n_ablate: int = 0                    # loss-aware unit deletions shortlisted per refresh (0 = disabled)
-    ablate_score: str = "gate_fisher"    # 'gate_fisher' | 'write_energy'
     refresh_every: int = 10              # steps between geometry refreshes
     screen_n: Optional[int] = None       # train points used by the structural screen (None = all)
     n_mc: int = 1                        # MC label samples for categorical Fisher
     fisher_batch: int = 256
-    fisher_quant_gamma: float = 0.2
-    fisher_general_lambda_u: float = 1e-8
-    fisher_general_lambda_d: float = 1e-7
-    fisher_general_mu: float = 1e-4
-    fisher_general_window: int = 16
-    fisher_general_min_savings: int = 1
-    fisher_general_pool: int = 8
-    fisher_general_starts: int = 2
-    fisher_general_iters: int = 4
-    fisher_general_update_pool: int = 4
-    fisher_t_rank: int = 4
-    fisher_t_lambda_m: float = 1e-8
+    fisher_strategy: Optional[FisherStrategy | str] = None
+    fisher_lambda_u: float = 1e-8
+    fisher_lambda_d: float = 1e-7
+    fisher_mu: float = 1e-4
+    fisher_pool: int = 8
+    fisher_time_limit: float = 60.0
+    fisher_gap: float = 0.01
+    fisher_bound: float = 10.0
+    fisher_log: bool = False
     # path
     max_steps: int = 100000
     expand_on_fail: int = 4              # retry with this many times more candidates before stopping
@@ -304,25 +297,29 @@ class PruneConfig:
             raise ValueError("criterion must be 'loss' or 'error'")
         if self.weight_score not in ("obd", "magnitude", "fdist"):
             raise ValueError("weight_score must be 'obd', 'magnitude' or 'fdist'")
-        if self.ablate_score not in ("gate_fisher", "write_energy"):
-            raise ValueError("ablate_score must be 'gate_fisher' or 'write_energy'")
-        if self.n_ablate < 0:
-            raise ValueError("n_ablate must be non-negative")
         if self.n_mc < 1:
             raise ValueError("n_mc must be positive")
-        if self.fisher_quant_gamma <= 0:
-            raise ValueError("fisher_quant_gamma must be positive")
-        if min(self.fisher_general_lambda_u, self.fisher_general_lambda_d,
-               self.fisher_general_mu) < 0:
-            raise ValueError("fisher_general penalties must be non-negative")
-        if self.fisher_t_lambda_m < 0:
-            raise ValueError("fisher_t_lambda_m must be non-negative")
-        if self.fisher_t_rank < 1:
-            raise ValueError("fisher_t_rank must be positive")
-        if min(self.fisher_general_window, self.fisher_general_min_savings,
-               self.fisher_general_pool, self.fisher_general_starts,
-               self.fisher_general_iters, self.fisher_general_update_pool) < 1:
-            raise ValueError("fisher_general search limits must be positive")
+        fisher_move = bool(self.struct_kinds and any(
+            name in {"fisher", "fisher_general"} for name in self.struct_kinds))
+        if fisher_move and any(name not in {"fisher", "fisher_general"}
+                               for name in self.struct_kinds):
+            raise ValueError("Fisher and Classic candidate pools cannot be mixed")
+        if fisher_move and self.weight_per_site:
+            raise ValueError("Fisher strategies already select scalar deletions")
+        if self.fisher_strategy is not None and not fisher_move:
+            raise ValueError("fisher_strategy requires a Fisher structural move")
+        if self.fisher_strategy is None and fisher_move:
+            self.fisher_strategy = resolve_strategy("fisher_general")
+        if isinstance(self.fisher_strategy, str):
+            self.fisher_strategy = resolve_strategy(self.fisher_strategy)
+        if min(self.fisher_lambda_u, self.fisher_lambda_d, self.fisher_mu) < 0:
+            raise ValueError("Fisher penalties must be non-negative")
+        if self.fisher_pool < 1:
+            raise ValueError("fisher_pool must be positive")
+        if self.fisher_time_limit <= 0:
+            raise ValueError("fisher_time_limit must be positive")
+        if not 0 <= self.fisher_gap < 1 or self.fisher_bound <= 0:
+            raise ValueError("invalid Fisher gap or compensation bound")
         if self.step_per_unit is not None and self.step_per_unit < 1:
             raise ValueError("step_per_unit must be positive")
         if self.stop_mode not in ("halt", "mark"):
@@ -578,6 +575,28 @@ def evaluate_candidates(adapter: Adapter, state: State, moves: list, C0: torch.T
     return out
 
 
+def evaluate_proxy(adapter: Adapter, state: State, moves: list, C0: torch.Tensor,
+                   cfg: PruneConfig) -> list:
+    k_cur = adapter.k_eff(state)
+    for move in sorted(moves, key=lambda candidate: candidate.pred_cost):
+        candidate = adapter.apply(state, move)
+        if candidate is None:
+            continue
+        dk = k_cur - adapter.k_eff(candidate)
+        if dk <= 0:
+            continue
+        losses = adapter.per_sample(candidate, cfg.select_split, "loss")
+        criterion = (losses if cfg.criterion == "loss" else
+                     adapter.per_sample(candidate, cfg.select_split, "error"))
+        mean, se = paired_stats(criterion, C0)
+        return [{"move": move, "state": candidate, "k": k_cur - dk, "dk": dk,
+                 "layer": move.layer, "crit": criterion,
+                 "mean_crit": float(criterion.mean()),
+                 "mean_loss": float(losses.mean()), "anch_mean": mean,
+                 "anch_se": se, "admissible": True}]
+    return []
+
+
 # --------------------------------------------------------------------------
 # The greedy path
 # --------------------------------------------------------------------------
@@ -618,6 +637,8 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
     fails_at = None
     stop_state = None
     termination = "max_steps"
+    trust_proxy = (cfg.fisher_strategy is not None and
+                   cfg.fisher_strategy.decision == "proxy")
     for step in range(1, cfg.max_steps + 1):
         if fails_at is not None and step - fails_at > cfg.post_stop_steps:
             termination = "stop_rule"
@@ -628,13 +649,17 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
         if ctx is None or since >= cfg.refresh_every:
             ctx, since = refresh(adapter, state, cfg), 0
         moves = candidates(adapter, state, ctx, cfg)
-        res = evaluate_candidates(adapter, state, moves, L0, cfg)
-        chosen, n_adm, n_ties = select_move(res, cfg)
+        res = (evaluate_proxy(adapter, state, moves, L0, cfg) if trust_proxy else
+               evaluate_candidates(adapter, state, moves, L0, cfg))
+        chosen, n_adm, n_ties = ((res[0], len(res), len(res)) if trust_proxy and res else
+                                 select_move(res, cfg))
         if chosen is None and cfg.expand_on_fail > 1 and (cfg.select_admissibility or not res):
             ctx, since = refresh(adapter, state, cfg), 0
             moves = candidates(adapter, state, ctx, cfg, expand=cfg.expand_on_fail)
-            res = evaluate_candidates(adapter, state, moves, L0, cfg)
-            chosen, n_adm, n_ties = select_move(res, cfg)
+            res = (evaluate_proxy(adapter, state, moves, L0, cfg) if trust_proxy else
+                   evaluate_candidates(adapter, state, moves, L0, cfg))
+            chosen, n_adm, n_ties = ((res[0], len(res), len(res))
+                                     if trust_proxy and res else select_move(res, cfg))
         if chosen is None:
             termination = "no_admissible_candidate"
             if cfg.verbose:
@@ -645,7 +670,7 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
             sm, sse = paired_stats(adapter.per_sample(chosen["state"], cfg.stop, cfg.criterion), S0)
         else:
             sm, sse = chosen["anch_mean"], chosen["anch_se"]
-        stop_pass = bool(sm <= cfg.n_sigma * sse + stop_tolerance)
+        stop_pass = trust_proxy or bool(sm <= cfg.n_sigma * sse + stop_tolerance)
         if not stop_pass and fails_at is None:
             fails_at = step
             stop_state = state
@@ -658,10 +683,7 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
         state = chosen["state"]
         since += 1
         mv = chosen["move"]
-        # Grouped-Fisher compensation depends on the complete current set of
-        # surviving activations and outgoing weights.  Never reuse a context
-        # containing those candidates after any state change.
-        if ctx is not None and (ctx.get("fisher_moves") or ctx.get("fisher_dynamic")):
+        if ctx is not None and ctx.get("fisher_moves"):
             ctx = None
         rows.append(_row(adapter, state, k0, step=step, method=label, kind=mv.kind,
                          site=mv.site, move=mv.describe(), layer=mv.layer,
@@ -669,17 +691,15 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
                          anch_mean=chosen["anch_mean"], anch_se=chosen["anch_se"],
                          stop_mean=sm, stop_se=sse, stop_pass=stop_pass,
                          n_cands=len(res), n_adm=n_adm, n_ties=n_ties,
-                         quant_case=mv.payload.get("quant_case"),
-                         quant_weight_groups=mv.payload.get("quant_weight_groups"),
-                         quant_total_groups=mv.payload.get("quant_total_groups"),
-                         quant_bias=mv.payload.get("quant_bias"),
-                         quant_step=mv.payload.get("quant_step"),
                          n_deleted=mv.payload.get("n_deleted"),
                          n_updates=mv.payload.get("n_updates"),
-                         basis_rank=mv.payload.get("basis_rank"),
-                         active_directions=mv.payload.get("active_directions"),
                          closure_savings=mv.payload.get("closure_savings"),
                          search_objective=mv.payload.get("search_objective"),
+                         solver_objective=mv.payload.get("solver_objective"),
+                         solver_gap=mv.payload.get("solver_gap"),
+                         solver_seconds=mv.payload.get("solver_seconds"),
+                         compensation_bound_active=mv.payload.get(
+                             "compensation_bound_active"),
                          seconds=time.time() - t0))
         if cfg.verbose and step % cfg.log_every == 0:
             r = rows[-1]
@@ -703,6 +723,7 @@ def prune_path(adapter: Adapter, state0: State, cfg: PruneConfig,
         "tie_break": cfg.tie_break,
         "stop_mode": cfg.stop_mode,
         "select_admissibility": cfg.select_admissibility,
+        "decision": "proxy" if trust_proxy else "validate",
         "max_frac": cfg.max_frac,
         "select_reference": float(L0.mean()),
         "stop_reference": float(stop_reference.mean()),
