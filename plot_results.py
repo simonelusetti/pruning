@@ -113,11 +113,11 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
                 axis.scatter(xpixel(rejected["removed_percent"]),
                              ypixel(rejected["loss_damage_percent"]),
                              marker="x", color=green, linewidths=3, s=175, zorder=7)
-    axis.text(2180, 300, "FORGE AXB UPDATES", color=purple, fontsize=16,
+    axis.text(2180, 300, "FISHER COMPLEMENT", color=purple, fontsize=16,
               fontweight="bold", va="top")
     axis.plot((2180, 2245), (365, 365), color=purple, linewidth=3, marker="o",
               markersize=7, markerfacecolor="white", markeredgewidth=2, zorder=5)
-    axis.text(2265, 365, "Module-wide OBS mask", fontsize=12, va="center")
+    axis.text(2265, 365, "One-shot OBS D (module-wide)", fontsize=12, va="center")
     axis.text(2180, 410, "10–30% accepted; 40% rejected (×)",
               color=purple, fontsize=11, va="top")
     if current is not None:
@@ -125,7 +125,7 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         axis.plot((2180, 2245), (485, 485), color=green, linewidth=3,
                   marker="D", markersize=7, markerfacecolor="white",
                   markeredgewidth=2, zorder=6)
-        axis.text(2265, 485, "SparseGPT blockwise mask", fontsize=12,
+        axis.text(2265, 485, "Fisher-aware D (blockwise)", fontsize=12,
                   va="center")
         accepted_targets = [round(100 * row["target_sparsity"])
                             for row in current["curve"]
@@ -138,9 +138,10 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         axis.text(2180, 530, f"10–{max(accepted_targets)}% accepted{status}"
                   if accepted_targets else "No accepted targets yet",
                   color=green, fontsize=11, va="top")
-    axis.text(2180, 625, "Both: B refreshed each block", fontsize=11, va="top")
-    axis.text(2180, 665, "16,256 gradient samples", fontsize=11, va="top")
-    axis.text(2180, 775, "Historical curves: raster only\n"
+    axis.text(2180, 625, "Both: full-module AXB updates", fontsize=11, va="top")
+    axis.text(2180, 665, "B refreshed each block", fontsize=11, va="top")
+    axis.text(2180, 705, "16,256 gradient samples", fontsize=11, va="top")
+    axis.text(2180, 800, "Historical curves: raster only\n"
               "Colored overlays: exact Forge coordinates\n"
               "Protocols are not fully matched",
               fontsize=10, color="#555555", va="top", linespacing=1.5)
