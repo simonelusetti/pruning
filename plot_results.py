@@ -40,21 +40,25 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
     height, width = image.shape[:2]
     if (width, height) != (2773, 1238):
         raise ValueError("historical OPT image dimensions changed; axis anchors need updating")
-    candidates = []
+    candidates = {"module_obs": [], "sparsegpt": []}
     for selection in ExperimentStore(store).all_selections():
         config = selection.experiment.config
         if config.benchmark.name != "opt" or config.branch.name != "fisher_complement":
             continue
         options = config.branch.options
         if (options.get("b_refresh") != "layer" or
-                options.get("mask_rule", "module_obs") != "module_obs" or
                 int(options.get("max_layers", 12)) != 12 or
                 options.get("modules", "all") != "all"):
             continue
-        candidates.extend(run for run in selection.runs or [] if run.status == "done")
-    if not candidates:
+        rule = options.get("mask_rule", "module_obs")
+        if rule in candidates:
+            candidates[rule].extend(
+                run for run in selection.runs or []
+                if run.status in {"done", "running"} and
+                (run.path / "result.json").exists())
+    if not candidates["module_obs"]:
         raise SystemExit("no completed refreshed-B OPT complement Forge run found")
-    run = max(candidates, key=lambda item: item.launched_on)
+    run = max(candidates["module_obs"], key=lambda item: item.launched_on)
     result = json.loads((run.path / "result.json").read_text())
     if result.get("status") != "complete":
         raise ValueError("Forge OPT result is incomplete")
@@ -85,17 +89,59 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         axis.plot((x[-1], rx), (y[-1], ry), color=purple, linewidth=2,
                   linestyle=":", zorder=5)
         axis.scatter(rx, ry, marker="x", color=purple, linewidths=3, s=175, zorder=6)
-    axis.text(2180, 300, "NEW FORGE RUN", color=purple, fontsize=16,
+    current = None
+    if candidates["sparsegpt"]:
+        run = max(candidates["sparsegpt"], key=lambda item: item.launched_on)
+        current = json.loads((run.path / "result.json").read_text())
+        completed = [row for row in current["curve"]
+                     if row.get("admissible") is True]
+        if len(completed) > 1:
+            green = "#00856a"
+            axis.plot([xpixel(row["removed_percent"]) for row in completed],
+                      [ypixel(row["loss_damage_percent"]) for row in completed],
+                      color=green, linewidth=3.5, marker="D", markersize=8,
+                      markerfacecolor="white", markeredgewidth=2.5, zorder=6)
+            rejected = next((row for row in current["curve"]
+                             if row.get("admissible") is False), None)
+            if rejected:
+                last = completed[-1]
+                axis.plot((xpixel(last["removed_percent"]),
+                           xpixel(rejected["removed_percent"])),
+                          (ypixel(last["loss_damage_percent"]),
+                           ypixel(rejected["loss_damage_percent"])),
+                          color=green, linewidth=2, linestyle=":", zorder=6)
+                axis.scatter(xpixel(rejected["removed_percent"]),
+                             ypixel(rejected["loss_damage_percent"]),
+                             marker="x", color=green, linewidths=3, s=175, zorder=7)
+    axis.text(2180, 300, "FORGE AXB UPDATES", color=purple, fontsize=16,
               fontweight="bold", va="top")
     axis.plot((2180, 2245), (365, 365), color=purple, linewidth=3, marker="o",
               markersize=7, markerfacecolor="white", markeredgewidth=2, zorder=5)
-    axis.text(2265, 365, "AXB full complement", fontsize=12, va="center")
-    axis.text(2180, 405, "B refreshed each block", fontsize=12, va="top")
-    axis.text(2180, 450, "16,256 gradient samples", fontsize=12, va="top")
-    axis.text(2180, 520, "10–30% accepted", color=purple, fontsize=12, va="top")
-    axis.text(2180, 565, "40% rejected (×)", color=purple, fontsize=12, va="top")
-    axis.text(2180, 680, "Historical curves: raster only\n"
-              "Purple: exact Forge coordinates\n"
+    axis.text(2265, 365, "Module-wide OBS mask", fontsize=12, va="center")
+    axis.text(2180, 410, "10–30% accepted; 40% rejected (×)",
+              color=purple, fontsize=11, va="top")
+    if current is not None:
+        green = "#00856a"
+        axis.plot((2180, 2245), (485, 485), color=green, linewidth=3,
+                  marker="D", markersize=7, markerfacecolor="white",
+                  markeredgewidth=2, zorder=6)
+        axis.text(2265, 485, "SparseGPT blockwise mask", fontsize=12,
+                  va="center")
+        accepted_targets = [round(100 * row["target_sparsity"])
+                            for row in current["curve"]
+                            if row.get("admissible") is True and
+                            row.get("target_sparsity", 0) > 0]
+        next_target = next((round(100 * run["target_sparsity"])
+                            for run in current.get("runs", [])
+                            if run.get("status") == "running"), None)
+        status = (f"; {next_target}% running" if next_target is not None else "")
+        axis.text(2180, 530, f"10–{max(accepted_targets)}% accepted{status}"
+                  if accepted_targets else "No accepted targets yet",
+                  color=green, fontsize=11, va="top")
+    axis.text(2180, 625, "Both: B refreshed each block", fontsize=11, va="top")
+    axis.text(2180, 665, "16,256 gradient samples", fontsize=11, va="top")
+    axis.text(2180, 775, "Historical curves: raster only\n"
+              "Colored overlays: exact Forge coordinates\n"
               "Protocols are not fully matched",
               fontsize=10, color="#555555", va="top", linespacing=1.5)
     output.parent.mkdir(parents=True, exist_ok=True)
