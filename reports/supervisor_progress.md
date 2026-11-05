@@ -32,22 +32,33 @@ We use two operational modes:
 
 ## Current results
 
-**Berman SimpleNN/MNIST.** The global Fisher General MIQP is the clearest positive result. It uses a full-model empirical Fisher, chooses among ranked batches of weight deletions and a small update pool, and rewards additional parameters removed by canonicalization. At roughly **50% parameter removal**, the retained comparison figure shows held-out test loss around **$0.97\times$ the original**, versus about **$1.05\times$** for the Berman iterative baseline at similar removal. The MIQP's deletion and update choices are made together within its candidate pool; the Berman baseline ranks individual weights by a diagonal Fisher score, deletes them in 10-percentage-point increments, and makes no compensating updates. These numbers are approximate readings of an [archived figure](../plots/berman/comparison.png); its original numeric result files were not transferred into Forge.
+**Berman SimpleNN/MNIST.** Fisher General uses a full-model empirical Fisher. Its MIQP jointly chooses from ranked batches of deletions and a small update pool, and rewards extra parameters removed by canonicalization. Berman's iterative baseline ranks individual parameters by a diagonal Fisher score, prunes in 10-percentage-point increments, and does not compensate surviving parameters. The table reports **held-out test-loss change relative to the original model**; negative values mean lower loss. Values are rounded readings at these removal levels from the [retained comparison](../plots/berman/comparison.png), not exact saved measurements.
 
-**OPT-125M.** The strongest internal full curve currently uses Fisher-aware SparseGPT: $A\otimes B$ scores help choose deletions within input-column blocks, while compensation is mostly SparseGPT's sequential $A$-based propagation. Its apparent advantage over native SparseGPT in the [archived comparison](../plots/opt/comparison_legacy.png) is **preliminary**, because evaluation offsets, actual removal, and other settings are not fully matched.
+| Parameters removed | Berman iterative | Fisher General MIQP |
+|---:|---:|---:|
+| 0% | 0% | 0% |
+| about 10% | about 0% | about 0% |
+| about 20% | −0.3% | −0.1% |
+| about 30% | −2.1% | −1.1% |
+| about 40% | −3.1% | −2.9% |
+| about 45% | +0.9% | −4.7% |
+| about 50% | +5.2% | −3.7% |
 
-We also tested a cleaner quadratic branch on OPT: estimate a layer-local Fisher as $A\otimes B$, rank deletions once per linear module, then let *all* surviving module weights compensate. With $B$ refreshed from 16,256 sampled gradient observations before every transformer block, the completed Forge run produced:
+The clearest advantage is near **45–50% removal**. The two curves are close at lower sparsities; Fisher General's advantage is not uniform across every step.
 
-| Target deletion | Actual removal | C4 selection-loss increase | Decision |
-|---:|---:|---:|:---|
-| 10% | 9.99% | 0.234% | Accepted |
-| 20% | 19.98% | 0.591% | Accepted |
-| 30% | 29.97% | 1.784% | Accepted |
-| 40% | 39.96% | 6.759% | Rejected; run stopped |
+**OPT-125M.** Fisher-aware SparseGPT uses $A\otimes B$ to score deletions within input-column blocks, then mainly uses SparseGPT's sequential $A$-based update. The newer full-complement branch ranks deletions once per linear module and lets *all* surviving module weights compensate under a local $A\otimes B$ quadratic. Its $B$ was refreshed from 16,256 sampled gradient observations before each transformer block. The table gives **C4 selection-loss increase relative to the original model**. The SparseGPT values are approximate readings near each removal level from the [retained comparison](../plots/opt/comparison_legacy.png); the full-complement values are exact from the completed Forge run.
 
-![OPT refreshed-B full-complement curve](../plots/report/opt_full_complement.png)
+| Decoder-linear parameters removed | Native SparseGPT | Fisher-aware SparseGPT | Refreshed-$B$ full complement |
+|---:|---:|---:|---:|
+| 0% | 0% | 0% | 0% |
+| about 10% | about +0.3% | about +0.2% | +0.234% at 9.99% |
+| about 20% | about +0.6% | about +0.5% | +0.591% at 19.98% |
+| about 30% | about +1.4% | about +1.2% | +1.784% at 29.97% |
+| about 40% | about +3.1% | about +2.5% | +6.759% at 39.96%; rejected |
+| about 45% | about +4.6%; stopped | about +3.9% | — |
+| about 50% | — | about +6.7% | — |
 
-The figure uses **four C4 selection sequences**; its error bars are twice the paired standard error. The 10% result is consistent with a separate diagnostic: on 128 held-out sequences, full complement increased loss by 0.215%, versus 0.255% for a Fisher-aware SparseGPT reference. But the methods removed 9.99% and 11.05% of parameters, respectively. Two sequential $A\otimes B$ variants in that diagnostic were better still (0.189% and 0.191%). The apparent 10% advantage therefore is not a matched update-rule comparison, and the higher-sparsity curve does not support replacing the sequential branch yet.
+The full-complement run used **four C4 selection sequences** and stopped after the rejected 40% proposal. The older SparseGPT curves used different evaluation offsets and differ in achieved removal and other settings, so their apparent ordering is not yet a matched baseline comparison. A separate 10% diagnostic on 128 held-out sequences found 0.215% loss increase for full complement and 0.255% for a Fisher-aware SparseGPT reference, but those methods removed 9.99% and 11.05% of parameters. Two sequential $A\otimes B$ variants in that diagnostic were better still (0.189% and 0.191%).
 
 ## Interpretation and next question
 
