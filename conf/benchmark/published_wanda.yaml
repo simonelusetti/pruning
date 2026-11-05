@@ -1,0 +1,6 @@
+name: published
+source: wanda
+model: decapoda-research/llama-7b-hf
+dataset: c4
+nsamples: 128
+seed: 0

@@ -1,0 +1,6 @@
+name: published
+source: flap
+model: decapoda-research/llama-7b-hf
+dataset: wikitext2
+nsamples: 1024
+seed: 0

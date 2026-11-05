@@ -17,7 +17,7 @@ import torch
 from datasets import Dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from run_cpu_close import DATASET_CACHE
+from pruning_experiments.opt_cpu import DATASET_CACHE
 
 
 def parse_args():

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "native_baselines")
 
 from nnprune.factorized_fisher import inverse_diagonal
 from nnprune.fisher import resolve_strategy
-from run_opt_fisher_sparsegpt import fisher_layer_miqp
+from pruning_experiments.opt_fisher import fisher_layer_miqp
 
 
 @unittest.skipUnless(importlib.util.find_spec("gurobipy"), "Gurobi is unavailable")

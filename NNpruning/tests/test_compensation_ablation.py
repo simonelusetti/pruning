@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "native_baselines"))
-from run_compensation_ablation import ALPHAS, apply_plan, exact_fisher_plan, predicted
+from pruning_experiments.compensation import ALPHAS, apply_plan, exact_fisher_plan, predicted
 
 
 class CompensationAblationTest(unittest.TestCase):

@@ -1,0 +1,4 @@
+name: berman
+rho: 0.05
+n_sigma: 2.0
+fisher_n: 500

@@ -1,0 +1,4 @@
+name: sparsegpt_published
+options:
+  sparsity: 0.5
+  python: null

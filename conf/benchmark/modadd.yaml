@@ -1,0 +1,4 @@
+name: modadd
+max_loss_error: 0.05
+validation_split_seed: 0
+supervisor_protocol: false

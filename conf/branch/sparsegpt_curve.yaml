@@ -1,0 +1,6 @@
+name: sparsegpt_curve
+options:
+  fine_spacing: 0.02
+  fine_until: 0.2
+  coarse_spacing: 0.05
+  max_sparsity: 0.5

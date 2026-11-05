@@ -1,0 +1,14 @@
+name: fisher_complement
+options:
+  targets: [0.1, 0.2, 0.3, 0.4, 0.5]
+  geometry: axb
+  deletion: obs
+  compensation: complement
+  structure: none
+  decision: validate
+  mu: 0.0
+  b_sequences: 128
+  b_context: 128
+  b_tokens: 16384
+  b_batch_size: 1
+  b_damp_ratio: 0.01
