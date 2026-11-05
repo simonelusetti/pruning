@@ -1,0 +1,6 @@
+name: published
+source: sparsegpt
+model: facebook/opt-125m
+dataset: c4
+nsamples: 128
+seed: 0

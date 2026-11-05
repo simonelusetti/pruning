@@ -1,0 +1,4 @@
+name: moons
+max_loss_error: 0.01
+validation_split_seed: 123
+supervisor_protocol: true

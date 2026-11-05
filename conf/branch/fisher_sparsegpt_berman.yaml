@@ -1,0 +1,6 @@
+name: fisher_sparsegpt
+options:
+  targets: [0.1, 0.2, 0.3, 0.4, 0.5]
+  blocksize: 128
+  percdamp: 0.01
+  b_damp: 0.01

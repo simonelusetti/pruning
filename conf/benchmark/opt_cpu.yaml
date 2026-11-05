@@ -1,0 +1,6 @@
+name: opt_cpu
+model: facebook/opt-125m
+seed: 0
+nsamples: 8
+seqlen: 512
+eval_tokens: 32768

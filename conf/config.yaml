@@ -1,0 +1,12 @@
+defaults:
+  - benchmark: moons
+  - branch: classic
+  - _self_
+
+forge:
+  store: null
+  tags: [pruning, "${benchmark.name}", "${branch.name}"]
+
+runtime:
+  device: cpu
+  threads: 8

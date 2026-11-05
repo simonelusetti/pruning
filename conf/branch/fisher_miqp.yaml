@@ -1,0 +1,12 @@
+name: fisher_miqp
+options:
+  targets: [0.00002]
+  pool: 128
+  repeat: false
+  time_limit: 10.0
+  gap: 0.05
+  b_sequences: 128
+  b_context: 128
+  b_tokens: 16384
+  b_batch_size: 1
+  b_damp_ratio: 0.01

@@ -1,0 +1,7 @@
+name: opt
+model: facebook/opt-125m
+seed: 0
+nsamples: 128
+seqlen: 2048
+rho: 0.05
+n_sigma: 2.0
