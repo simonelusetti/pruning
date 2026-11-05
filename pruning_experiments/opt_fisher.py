@@ -60,6 +60,8 @@ def parse_args(argv=None):
     parser.add_argument("--fisher-deletion", choices=("obs", "miqp"))
     parser.add_argument("--fisher-compensation",
                         choices=("sparsegpt", "sparse_miqp", "dense", "complement"))
+    parser.add_argument("--fisher-mask-rule", choices=("module_obs", "sparsegpt"),
+                        default="module_obs")
     parser.add_argument("--fisher-cg-rtol", type=float, default=1e-6)
     parser.add_argument("--fisher-cg-max-iterations", type=int, default=1000)
     parser.add_argument("--fisher-update-scope", choices=("layer",))
@@ -114,6 +116,8 @@ def parse_args(argv=None):
     if args.b_refresh == "layer" and (
             args.fisher_strategy.geometry != "axb" or args.b_batch_size != 1):
         parser.error("per-layer B refresh requires AXB geometry and B batch size 1")
+    if args.fisher_mask_rule != "module_obs" and args.fisher_strategy.compensation != "complement":
+        parser.error("SparseGPT mask selection requires full-complement compensation")
     return args
 
 
@@ -332,6 +336,17 @@ def fisher_sparsegpt(module, a, b, b_inverse_diagonal, sparsity,
 
 
 @torch.inference_mode()
+def fisher_sparsegpt_mask(module, a, b_inverse_diagonal, sparsity, percdamp, blocksize):
+    original = module.weight.detach().clone()
+    try:
+        fisher_sparsegpt(module, a, None, b_inverse_diagonal, sparsity,
+                         percdamp, blocksize)
+        return (module.weight == 0).detach().clone()
+    finally:
+        module.weight.copy_(original)
+
+
+@torch.inference_mode()
 def fisher_sparsegpt_axb(module, a, gradients, b_inverse_diagonal, sparsity,
                          percdamp, blocksize, b_damp_ratio,
                          b_inverse_matrix=None, b_factor=None):
@@ -409,22 +424,32 @@ def fisher_sparsegpt_axb(module, a, gradients, b_inverse_diagonal, sparsity,
 
 
 @torch.inference_mode()
-def fisher_layer_complement(module, a, b, b_inverse_diagonal, sparsity, args):
+def fisher_layer_complement(module, a, b, b_inverse_diagonal, sparsity, args,
+                            deletion_mask=None):
     started = time.perf_counter()
     weight = module.weight.detach().double().clone()
     a = a.to(weight)
     a = ((a + a.T) / 2).clone()
     a.diagonal().add_(args.percdamp * a.diag().mean())
     b = b.to(weight)
-    deleted = weight == 0
-    count = max(0, math.ceil(sparsity * weight.numel()) - int(deleted.sum()))
-    if count:
-        saliency = weight.square() / (
-            b_inverse_diagonal.to(weight)[:, None] *
-            inverse_diagonal(a).to(weight)[None, :]).clamp_min(1e-30)
-        saliency.masked_fill_(deleted, torch.inf)
-        indices = torch.topk(saliency.flatten(), count, largest=False).indices
-        deleted.flatten()[indices] = True
+    original_zeros = weight == 0
+    if deletion_mask is None:
+        deleted = original_zeros.clone()
+        count = max(0, math.ceil(sparsity * weight.numel()) - int(deleted.sum()))
+        if count:
+            saliency = weight.square() / (
+                b_inverse_diagonal.to(weight)[:, None] *
+                inverse_diagonal(a).to(weight)[None, :]).clamp_min(1e-30)
+            saliency.masked_fill_(deleted, torch.inf)
+            indices = torch.topk(saliency.flatten(), count, largest=False).indices
+            deleted.flatten()[indices] = True
+        rule = "module-wide generalized OBS ranking"
+    else:
+        if deletion_mask.shape != weight.shape or deletion_mask.dtype != torch.bool:
+            raise ValueError("deletion mask must match the module weight matrix")
+        deleted = deletion_mask.to(weight.device).clone() | original_zeros
+        count = int((deleted & ~original_zeros).sum())
+        rule = "Fisher-aware SparseGPT blockwise mask; temporary updates discarded"
     delta, record = complement_update(
         weight, a, b, deleted, mu=args.fisher_mu,
         rtol=args.fisher_cg_rtol, max_iterations=args.fisher_cg_max_iterations,
@@ -437,7 +462,7 @@ def fisher_layer_complement(module, a, b, b_inverse_diagonal, sparsity, args):
     return {**record, "deleted": count, "actual_zeros": int(deleted.sum()),
             "updates": int(torch.count_nonzero(delta.masked_fill(deleted, 0.))),
             "seconds": time.perf_counter() - started,
-            "deletion_selection": "fixed generalized-OBS ranking; no joint support optimization"}
+            "deletion_selection": rule}
 
 
 @torch.inference_mode()
@@ -756,9 +781,13 @@ def prune_model(model, calibration, target, b_factors, b_inverse, layers_count,
         for name in names:
             key = (layer_index, name)
             if args.fisher_strategy.compensation == "complement":
+                mask = (fisher_sparsegpt_mask(
+                    modules[name], a_factors[name], layer_b_inverse[key], target,
+                    args.percdamp, args.blocksize)
+                    if args.fisher_mask_rule == "sparsegpt" else None)
                 records[name] = fisher_layer_complement(
                     modules[name], a_factors[name], layer_b_factors[key], layer_b_inverse[key],
-                    target, args)
+                    target, args, deletion_mask=mask)
             elif args.fisher_strategy.deletion == "miqp":
                 update = (fisher_layer_miqp_repeated if args.fisher_repeat
                           else fisher_layer_miqp)
@@ -853,7 +882,9 @@ def main(argv=None):
     complement = args.fisher_strategy.compensation == "complement"
     if complement:
         approximations += [
-            "deletions are fixed by generalized-OBS ranking, not joint MIQP selection",
+            ("deletions use the Fisher-aware SparseGPT blockwise adaptive mask; its temporary updates are discarded"
+             if args.fisher_mask_rule == "sparsegpt" else
+             "deletions are fixed by module-wide generalized-OBS ranking, not joint MIQP selection"),
             "all surviving module weights compensate via a matrix-free constrained quadratic solve",
             "A/B stay fixed within each module; biases remain fixed",
         ]
@@ -876,7 +907,9 @@ def main(argv=None):
 
     result = {
         "result_schema": 3, "status": "running",
-        "method": ("Fisher full-layer complement" if complement else
+        "method": (("Fisher full-layer complement (SparseGPT mask)"
+                    if args.fisher_mask_rule == "sparsegpt" else
+                    "Fisher full-layer complement") if complement else
                    "Fisher layer-local MIQP" if args.fisher_strategy.deletion == "miqp"
                    else "Fisher-aware SparseGPT"),
         "model": args.model, "model_dtype": args.model_dtype,
@@ -886,13 +919,16 @@ def main(argv=None):
                         "b_sequences": args.b_sequences,
                         "b_context": args.b_context, "b_tokens": args.b_tokens},
         "protocol": {"blocksize": args.blocksize, "percdamp": args.percdamp,
+                     "mask_rule": args.fisher_mask_rule,
                      "b_damp_ratio": args.b_damp_ratio,
                      "b_refresh": args.b_refresh,
                      "B": b_description,
                      "A": "collected once per layer from the current layer inputs",
                      "mask": ("generalized OBS candidate pool"
-                              if args.fisher_strategy.deletion == "miqp"
-                              else "generalized OBS saliency"),
+                              if args.fisher_strategy.deletion == "miqp" else
+                              "Fisher-aware SparseGPT blockwise adaptive mask"
+                              if complement and args.fisher_mask_rule == "sparsegpt" else
+                              "generalized OBS saliency"),
                      "compensation": ("full-complement constrained AXB solve" if complement else
                                       "Gurobi MIQP within one linear layer"
                                       if args.fisher_strategy.deletion == "miqp"

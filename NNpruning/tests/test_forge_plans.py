@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from hydra import compose, initialize
+from omegaconf import OmegaConf
 
 from pruning_experiments.plans import build_plan
 
@@ -27,6 +28,25 @@ class ForgePlansTest(unittest.TestCase):
         self.assertIn("--fisher-compensation", plan.arguments)
         self.assertIn("complement", plan.arguments)
         self.assertIn("--b-sequences", plan.arguments)
+
+        matched = self.plan("benchmark=opt", "branch=fisher_complement_sparsegpt_mask")
+        self.assertIn("--fisher-mask-rule", matched.arguments)
+        self.assertIn("sparsegpt", matched.arguments)
+
+    def test_opt_matched_presets_change_only_the_update_rule(self):
+        with initialize(version_base=None, config_path="../../conf"):
+            sequential = compose(config_name="config", overrides=[
+                "benchmark=opt", "branch=fisher_sparsegpt_refresh"])
+            complement = compose(config_name="config", overrides=[
+                "benchmark=opt", "branch=fisher_complement_sparsegpt_mask"])
+        self.assertEqual(OmegaConf.to_container(sequential.benchmark),
+                         OmegaConf.to_container(complement.benchmark))
+        sequential_options = OmegaConf.to_container(sequential.branch.options)
+        complement_options = OmegaConf.to_container(complement.branch.options)
+        for key in ("compensation", "mask_rule", "mu", "cg_max_iterations"):
+            sequential_options.pop(key, None)
+            complement_options.pop(key, None)
+        self.assertEqual(sequential_options, complement_options)
 
     def test_published_method_requires_its_own_model_and_cuda(self):
         with self.assertRaises(ValueError):

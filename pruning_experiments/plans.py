@@ -112,9 +112,11 @@ def build_plan(cfg: DictConfig, run_dir: Path) -> Plan:
         if branch == "fisher_miqp":
             args += ["--fisher-deletion", "miqp", "--fisher-compensation", "sparse_miqp",
                      "--fisher-update-scope", "layer"]
-        mapping = {"targets": "--targets", "geometry": "--fisher-geometry",
+        mapping = {"targets": "--targets", "max_layers": "--max-layers",
+                   "modules": "--modules", "geometry": "--fisher-geometry",
                    "model_dtype": "--model-dtype",
                    "deletion": "--fisher-deletion", "compensation": "--fisher-compensation",
+                   "mask_rule": "--fisher-mask-rule",
                    "structure": "--fisher-structure", "decision": "--fisher-decision",
                    "mu": "--fisher-mu", "pool": "--fisher-pool",
                    "repeat": "--fisher-repeat", "time_limit": "--fisher-time-limit",

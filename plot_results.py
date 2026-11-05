@@ -45,7 +45,11 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         config = selection.experiment.config
         if config.benchmark.name != "opt" or config.branch.name != "fisher_complement":
             continue
-        if config.branch.options.get("b_refresh") != "layer":
+        options = config.branch.options
+        if (options.get("b_refresh") != "layer" or
+                options.get("mask_rule", "module_obs") != "module_obs" or
+                int(options.get("max_layers", 12)) != 12 or
+                options.get("modules", "all") != "all"):
             continue
         candidates.extend(run for run in selection.runs or [] if run.status == "done")
     if not candidates:
@@ -118,6 +122,10 @@ def main() -> None:
     for selection in ExperimentStore(args.store).all_selections():
         config = selection.experiment.config
         if config.benchmark.name != args.benchmark:
+            continue
+        if args.benchmark == "opt" and (
+                int(config.branch.options.get("max_layers", 12)) != 12 or
+                config.branch.options.get("modules", "all") != "all"):
             continue
         completed = [run for run in selection.runs or [] if run.status == "done"]
         if not completed:

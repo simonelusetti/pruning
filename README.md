@@ -32,6 +32,8 @@ forge run benchmark=berman branch=fisher_sparsegpt_berman runtime.device=cpu
 forge run benchmark=opt branch=fisher_sparsegpt runtime.device=cuda:0
 forge run benchmark=opt branch=fisher_complement runtime.device=cuda:0
 forge run benchmark=opt branch=fisher_complement_refresh runtime.device=cpu
+forge run benchmark=opt branch=fisher_sparsegpt_refresh runtime.device=cpu
+forge run benchmark=opt branch=fisher_complement_sparsegpt_mask runtime.device=cpu
 forge run benchmark=opt_cpu branch=sparsegpt runtime.device=cpu
 ```
 
@@ -45,7 +47,7 @@ forge artifact 'result.json'
 
 Benchmark and branch preset names ending in `_berman` or `_modadd` supply benchmark-specific controls. Their `benchmark.name` and `branch.name` still identify the shared task and method. Set experiment parameters under `benchmark.*` or `branch.options.*`; `runtime.device` and `runtime.threads` control execution and do not change Forge's experiment signature. OPT random seeds are in `benchmark.seed` because they affect the experiment. A run with an unsupported benchmark/method pair fails before model loading.
 
-`fisher_sparsegpt` is the maintained OPT Fisher-aware SparseGPT branch. `fisher_complement` uses the same factorized Fisher geometry with generalized-OBS deletion and full same-layer quadratic compensation. `fisher_miqp` uses a bounded same-layer mixed-integer pool. `fisher_general` is the Gurobi MLP method. Classic structural and weight-zeroing moves use `classic` and `classic_weights`. Berman, SparseGPT, Wanda, and FLAP baselines are settings as well. The published branches launch the pinned authors' implementations in their separate environments and require CUDA; bootstrap those repositories with `python3 native_baselines/bootstrap.py` first.
+`fisher_sparsegpt` is the maintained OPT Fisher-aware SparseGPT branch. `fisher_complement` uses the same factorized Fisher geometry with module-wide generalized-OBS deletion and full same-module quadratic compensation. The `fisher_sparsegpt_refresh` and `fisher_complement_sparsegpt_mask` presets share the same calibration, B refresh, precision, targets, and selection settings. The latter generates exactly the Fisher-aware SparseGPT blockwise mask, discards its temporary updates, then solves the unpenalized quadratic for all surviving weights in that module. `fisher_miqp` uses a bounded same-layer mixed-integer pool. `fisher_general` is the Gurobi MLP method. Classic structural and weight-zeroing moves use `classic` and `classic_weights`. Berman, SparseGPT, Wanda, and FLAP baselines are settings as well. The published branches launch the pinned authors' implementations in their separate environments and require CUDA; bootstrap those repositories with `python3 native_baselines/bootstrap.py` first.
 
 Result files live inside each Forge run. Plot completed curves with:
 
