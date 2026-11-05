@@ -48,7 +48,7 @@ The clearest advantage is near **45–50% removal**. The two curves are close at
 
 **OPT-125M.** Fisher-aware SparseGPT uses $A\otimes B$ to score deletions within input-column blocks, then mainly uses SparseGPT's sequential $A$-based update. The newer full-complement branch ranks deletions once per linear module and lets *all* surviving module weights compensate under a local $A\otimes B$ quadratic. Its $B$ was refreshed from 16,256 sampled gradient observations before each transformer block. The table gives **C4 selection-loss increase relative to the original model**. The SparseGPT values are approximate readings near each removal level from the [retained comparison](../plots/opt/comparison_legacy.png); the full-complement values are exact from the completed Forge run.
 
-| Decoder-linear parameters removed | Native SparseGPT | Fisher-aware SparseGPT | Refreshed-$B$ full complement |
+| Decoder-linear parameters removed | Local SparseGPT implementation | Fisher-aware SparseGPT | Refreshed-$B$ full complement |
 |---:|---:|---:|---:|
 | 0% | 0% | 0% | 0% |
 | about 10% | about +0.3% | about +0.2% | +0.234% at 9.99% |
@@ -58,7 +58,7 @@ The clearest advantage is near **45–50% removal**. The two curves are close at
 | about 45% | about +4.6%; stopped | about +3.9% | — |
 | about 50% | — | about +6.7% | — |
 
-The full-complement run used **four C4 selection sequences** and stopped after the rejected 40% proposal. The older SparseGPT curves used different evaluation offsets and differ in achieved removal and other settings, so their apparent ordering is not yet a matched baseline comparison. A separate 10% diagnostic on 128 held-out sequences found 0.215% loss increase for full complement and 0.255% for a Fisher-aware SparseGPT reference, but those methods removed 9.99% and 11.05% of parameters. Two sequential $A\otimes B$ variants in that diagnostic were better still (0.189% and 0.191%).
+The full-complement run used **four C4 selection sequences** and stopped after the rejected 40% proposal. These were independently sampled windows from the same C4 training shard used for calibration, not a separate validation shard. The older SparseGPT curves used different evaluation offsets and differ in achieved removal and other settings, so their apparent ordering is not yet a matched baseline comparison. A separate 10% diagnostic on 128 independently sampled C4 windows found 0.215% loss increase for full complement and 0.255% for a Fisher-aware SparseGPT reference, but those methods removed 9.99% and 11.05% of parameters. Two sequential $A\otimes B$ variants in that diagnostic were better still (0.189% and 0.191%).
 
 ## Interpretation and next question
 
