@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from forge import ExperimentStore
+from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parent
 
@@ -51,11 +52,18 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
                 options.get("modules", "all") != "all"):
             continue
         rule = options.get("mask_rule", "module_obs")
-        if rule in candidates:
-            candidates[rule].extend(
-                run for run in selection.runs or []
+        runs = [run for run in selection.runs or []
                 if run.status in {"done", "running"} and
-                (run.path / "result.json").exists())
+                (run.path / "result.json").exists()]
+        if rule == "module_obs":
+            candidates[rule].extend(runs)
+        elif rule == "sparsegpt":
+            shared_options = OmegaConf.to_container(options, resolve=True)
+            shared_options.pop("targets", None)
+            key = json.dumps({"benchmark": OmegaConf.to_container(
+                config.benchmark, resolve=True), "options": shared_options},
+                sort_keys=True)
+            candidates[rule].extend((run, key) for run in runs)
     if not candidates["module_obs"]:
         raise SystemExit("no completed refreshed-B OPT complement Forge run found")
     run = max(candidates["module_obs"], key=lambda item: item.launched_on)
@@ -91,18 +99,29 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         axis.scatter(rx, ry, marker="x", color=purple, linewidths=3, s=175, zorder=6)
     current = None
     if candidates["sparsegpt"]:
-        run = max(candidates["sparsegpt"], key=lambda item: item.launched_on)
-        current = json.loads((run.path / "result.json").read_text())
-        completed = [row for row in current["curve"]
-                     if row.get("admissible") is True]
+        latest, key = max(candidates["sparsegpt"],
+                          key=lambda item: item[0].launched_on)
+        matching = sorted((run for run, shared in candidates["sparsegpt"]
+                           if shared == key), key=lambda run: run.launched_on)
+        by_target = {}
+        for run in matching:
+            result = json.loads((run.path / "result.json").read_text())
+            for row in result["curve"]:
+                if row.get("target_sparsity") == 0 or row.get("admissible") is not None:
+                    by_target[row["target_sparsity"]] = row
+            if run == latest:
+                current = result
+        completed = [row for _, row in sorted(by_target.items())
+                     if row.get("target_sparsity") == 0 or
+                     row.get("admissible") is True]
+        rejected = next((row for _, row in sorted(by_target.items())
+                         if row.get("admissible") is False), None)
         if len(completed) > 1:
             green = "#00856a"
             axis.plot([xpixel(row["removed_percent"]) for row in completed],
                       [ypixel(row["loss_damage_percent"]) for row in completed],
                       color=green, linewidth=3.5, marker="D", markersize=8,
                       markerfacecolor="white", markeredgewidth=2.5, zorder=6)
-            rejected = next((row for row in current["curve"]
-                             if row.get("admissible") is False), None)
             if rejected:
                 last = completed[-1]
                 axis.plot((xpixel(last["removed_percent"]),
@@ -128,13 +147,15 @@ def opt_historical_overlay(store: Path, output: Path) -> None:
         axis.text(2265, 485, "Fisher-aware D (blockwise)", fontsize=12,
                   va="center")
         accepted_targets = [round(100 * row["target_sparsity"])
-                            for row in current["curve"]
+                            for row in completed
                             if row.get("admissible") is True and
                             row.get("target_sparsity", 0) > 0]
         next_target = next((round(100 * run["target_sparsity"])
                             for run in current.get("runs", [])
                             if run.get("status") == "running"), None)
-        status = (f"; {next_target}% running" if next_target is not None else "")
+        status = (f"; {round(100 * rejected['target_sparsity'])}% rejected"
+                  if rejected else f"; {next_target}% running"
+                  if next_target is not None else "")
         axis.text(2180, 530, f"10–{max(accepted_targets)}% accepted{status}"
                   if accepted_targets else "No accepted targets yet",
                   color=green, fontsize=11, va="top")
