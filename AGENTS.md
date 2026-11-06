@@ -7,3 +7,4 @@
 - Maintained methods are `classic` (S or W+S), `fisher_general` (Gurobi MIQP on Bernoulli MLPs), and Fisher-aware SparseGPT for OPT.
 - The maintained local benchmarks are two-moons for quick checks and modular addition for minute-scale checks. Native SparseGPT, Wanda, and FLAP scripts retain their published model/data settings.
 - Do not add CNN or Fashion-MNIST code.
+- Launch long-running experiments in a detached `tmux` session and verify the worker remains active after launch.
