@@ -1,6 +1,8 @@
 .pylibs/
 .venv/
-outputs/
+/outputs/*
+!/outputs/plots/
+!/outputs/reports/
 __pycache__/
 .pytest_cache/
 .DS_Store
@@ -18,10 +20,5 @@ __MACOSX/
 *.out
 *.aux
 *.toc
-native_baselines/vendor/
-native_baselines/cache/
-native_baselines/results*/
-checkpoints/
-handoff/
 results*/
 **/results*/
