@@ -4,7 +4,7 @@ import hydra
 from forge import start_run
 from omegaconf import DictConfig
 
-from pruning_experiments import execute
+from pruning.experiments import execute
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")

@@ -1,4 +1,0 @@
-name: compensation_ablation
-options:
-  target: 0.3
-  mu: 0.0001

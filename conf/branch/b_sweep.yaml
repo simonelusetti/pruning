@@ -1,4 +1,0 @@
-name: b_sweep
-options:
-  cases: all
-  heldout_count: 8
