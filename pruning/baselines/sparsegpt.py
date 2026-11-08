@@ -15,7 +15,7 @@ def sparsegpt_matrix(weight: torch.Tensor, hessian: torch.Tensor, sparsity: floa
 
     dtype = weight.dtype
     values = weight.float().clone()
-    curvature = hessian.float().clone()
+    curvature = hessian.to(device=weight.device, dtype=torch.float32).clone()
     dead = curvature.diag() == 0
     curvature[dead, dead] = 1
     values[:, dead] = 0

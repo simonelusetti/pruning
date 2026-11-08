@@ -8,6 +8,13 @@ from .core import ACTIVE, REMOVED, Move, State
 from .fisher import resolve_strategy, validate_strategy
 
 
+def add_quadratic_terms(expression, matrix, variables, scale):
+    rows, columns = matrix.nonzero(as_tuple=True)
+    expression.addTerms((.5 * matrix[rows, columns] / scale).tolist(),
+                        [variables[i] for i in rows.tolist()],
+                        [variables[i] for i in columns.tolist()])
+
+
 def _layout(state: State):
     names = list(state.params)
     offsets = {}
@@ -233,17 +240,17 @@ def _canonical_retained(model, adapter, state, offsets, d_by_global):
 
 def miqp_moves(adapter, state, cfg) -> list[Move]:
     strategy = validate_strategy(
-        cfg.fisher_strategy or resolve_strategy("fisher_general"), "mlp")
+        cfg.fisher_strategy or resolve_strategy("discrete"), "mlp")
     if adapter.loss_type != "bernoulli":
-        raise ValueError("Fisher General currently supports Bernoulli MLPs")
+        raise ValueError("Discrete MIQP currently supports Bernoulli MLPs")
     if any(bool(((state.struct[f"type{layer}"] != ACTIVE)
                  & (state.struct[f"type{layer}"] != REMOVED)).any())
            for layer in range(adapter.L - 1)):
-        raise ValueError("Fisher General does not support nonstandard hidden-unit states")
+        raise ValueError("Discrete MIQP does not support nonstandard hidden-unit states")
     try:
         import gurobipy as gp
     except ImportError as error:
-        raise RuntimeError("Fisher General requires gurobipy") from error
+        raise RuntimeError("Discrete MIQP requires gurobipy") from error
 
     names, offsets, theta, live = _layout(state)
     design = _fisher_design(adapter, state, cfg, names)
@@ -321,11 +328,8 @@ def miqp_moves(adapter, state, cfg) -> list[Move]:
                 cfg.fisher_mu, cfg.fisher_lambda_u,
                 cfg.fisher_lambda_d, 1e-12)
     objective = gp.QuadExpr()
+    add_quadratic_terms(objective, q, displacement, scale)
     for row in range(len(coordinates)):
-        for column in range(len(coordinates)):
-            coefficient = .5 * float(q[row, column]) / scale
-            if coefficient:
-                objective += coefficient * displacement[row] * displacement[column]
         objective += (.5 * cfg.fisher_mu / scale) * c[row] * c[row]
         if sparse:
             objective += (cfg.fisher_lambda_u / scale) * u[row]
@@ -344,7 +348,7 @@ def miqp_moves(adapter, state, cfg) -> list[Move]:
     if solver.SolCount == 0:
         status = solver.Status
         solver.dispose()
-        raise RuntimeError(f"Gurobi found no feasible Fisher General solution (status {status})")
+        raise RuntimeError(f"Gurobi found no feasible Discrete MIQP solution (status {status})")
 
     deleted = tuple(coordinates[i] for i, value in enumerate(d) if value.X > .5)
     updated = tuple(coordinates[i] for i, value in enumerate(c)
@@ -369,7 +373,7 @@ def miqp_moves(adapter, state, cfg) -> list[Move]:
     tolerance = 1e-7 * max(1., abs(direct_objective), abs(solver_objective))
     if abs(direct_objective - solver_objective) > tolerance:
         solver.dispose()
-        raise RuntimeError("Fisher General objective does not agree with direct evaluation")
+        raise RuntimeError("Discrete MIQP objective does not agree with direct evaluation")
     modeled_savings = round(float(savings.getValue()))
     if modeled_savings != rewarded_savings:
         solver.dispose()

@@ -1,3 +1,9 @@
 name: sparsegpt
+calibration_refresh: fixed
+schedule:
+  mode: independent
+  targets:
+  - 0.5
 options:
-  sparsity: 0.5
+  percdamp: 0.01
+  blocksize: 128

@@ -1,2 +1,5 @@
-name: classic_weights
-options: {}
+defaults:
+- classic
+- _self_
+options:
+  weights: true

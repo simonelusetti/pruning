@@ -1,7 +1,0 @@
-defaults:
-  - fisher_sparsegpt
-  - _self_
-options:
-  model_dtype: float32
-  b_tokens: 16256
-  b_refresh: layer

@@ -1,0 +1,10 @@
+selection_check: ${benchmark.selection_check}
+candidate_selection: loss
+rho: ${benchmark.rho}
+n_sigma: ${benchmark.n_sigma}
+max_steps: ${benchmark.max_steps}
+max_removed: ${benchmark.max_removed}
+stop_mode: ${benchmark.stop_mode}
+save_model: false
+reporting_every: ${oc.select:benchmark.reporting_every,1}
+trace: false

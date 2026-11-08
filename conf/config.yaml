@@ -1,12 +1,17 @@
 defaults:
-  - benchmark: moons
-  - branch: classic
-  - _self_
-
+- benchmark: moons
+- branch: classic
+- sampling: default
+- protocol: default
+- _self_
 forge:
   store: null
-  tags: [pruning, "${benchmark.name}", "${branch.name}"]
-
+  on_finish: [python3, pruning/plot_results.py]
+  tags:
+  - pruning
+  - ${benchmark.name}
+  - ${branch.name}
 runtime:
   device: cpu
   threads: 8
+  python: null

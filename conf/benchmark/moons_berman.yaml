@@ -1,4 +1,7 @@
-name: moons
-max_loss_error: 0.05
-validation_split_seed: 0
+defaults:
+- moons
+- _self_
 fisher_n: 500
+fisher_seed: 42
+berman_spacing: 0.02
+berman_maximum: 0.98

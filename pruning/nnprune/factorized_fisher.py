@@ -5,7 +5,7 @@ import torch
 
 @torch.no_grad()
 def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
-                      max_iterations=1000, progress=None):
+                      max_iterations=1000, progress=None, b_inverse=None):
     """Minimize the AXB quadratic with fixed deletions and all survivors free."""
     if weight.ndim != 2 or deleted.shape != weight.shape or deleted.dtype != torch.bool:
         raise ValueError("weight and boolean deletion mask must have the same matrix shape")
@@ -28,15 +28,25 @@ def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
     if float(rhs_norm) > 0:
         if progress is not None:
             progress(0, 1.)
-        a_values, a_vectors = torch.linalg.eigh(a)
-        b_values, b_vectors = torch.linalg.eigh(b)
-        denominator = b_values[:, None] * a_values[None, :] + mu
-        if float(a_values.min()) <= 0 or float(b_values.min()) <= 0:
-            raise ValueError("complement updates require positive definite AXB factors")
+        if mu == 0:
+            a_inverse = torch.cholesky_inverse(torch.linalg.cholesky(a))
+            if b_inverse is None:
+                b_inverse = torch.cholesky_inverse(torch.linalg.cholesky(b))
+            else:
+                b_inverse = b_inverse.to(weight)
 
-        def precondition(values):
-            spectral = b_vectors.T @ values @ a_vectors
-            return (b_vectors @ (spectral / denominator) @ a_vectors.T).masked_fill(deleted, 0.)
+            def precondition(values):
+                return (b_inverse @ values @ a_inverse).masked_fill(deleted, 0.)
+        else:
+            a_values, a_vectors = torch.linalg.eigh(a)
+            b_values, b_vectors = torch.linalg.eigh(b)
+            denominator = b_values[:, None] * a_values[None, :] + mu
+            if float(a_values.min()) <= 0 or float(b_values.min()) <= 0:
+                raise ValueError("complement updates require positive definite AXB factors")
+
+            def precondition(values):
+                spectral = b_vectors.T @ values @ a_vectors
+                return (b_vectors @ (spectral / denominator) @ a_vectors.T).masked_fill(deleted, 0.)
 
         z = precondition(residual)
         direction = z.clone()

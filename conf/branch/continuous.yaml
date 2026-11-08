@@ -1,0 +1,14 @@
+name: continuous
+schedule:
+  targets: null
+  mode: progressive
+  spacing: 0.05
+options:
+  deletion_unit: weight
+  mu: 0.0
+  percdamp: 0.01
+  blocksize: 128
+  cg_rtol: 1.0e-06
+  cg_max_iterations: 10000
+  b_damp_ratio: 0.01
+  b_refresh: layer

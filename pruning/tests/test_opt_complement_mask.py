@@ -1,11 +1,10 @@
 import unittest
-from types import SimpleNamespace
 
 import torch
 
-from pruning.experiments.opt_fisher import (fisher_layer_complement,
-                                            fisher_sparsegpt,
-                                            fisher_sparsegpt_mask)
+from pruning.baselines.sparsegpt import sparsegpt_matrix
+from pruning.methods.continuous import blockwise_obs_mask
+from pruning.nnprune.factorized_fisher import complement_update
 
 
 class ComplementMaskTest(unittest.TestCase):
@@ -23,7 +22,7 @@ class ComplementMaskTest(unittest.TestCase):
         before = original.weight.detach().clone()
         bias = original.bias.detach().clone()
 
-        mask = fisher_sparsegpt_mask(original, a, b_inverse_diagonal, .3, .01, 2)
+        mask = blockwise_obs_mask(original, a, b_inverse_diagonal, .3, .01, 2)
         torch.testing.assert_close(original.weight, before)
         torch.testing.assert_close(original.bias, bias)
 
@@ -32,12 +31,18 @@ class ComplementMaskTest(unittest.TestCase):
         with torch.no_grad():
             sequential.weight.copy_(before)
             full.weight.copy_(before)
-        fisher_sparsegpt(sequential, a, None, b_inverse_diagonal, .3, .01, 2)
-        self.assertTrue(torch.equal(mask, sequential.weight == 0))
+        sequential_weight, sequential_mask = sparsegpt_matrix(
+            before, a, .3, percdamp=.01, blocksize=2,
+            output_inverse_diagonal=b_inverse_diagonal)
+        with torch.no_grad():
+            sequential.weight.copy_(sequential_weight)
+        self.assertTrue(torch.equal(mask, sequential_mask))
 
-        args = SimpleNamespace(percdamp=.01, fisher_mu=0.,
-                               fisher_cg_rtol=1e-8, fisher_cg_max_iterations=500)
-        record = fisher_layer_complement(full, a, b, mask, args)
+        damped = a.double().clone()
+        damped.diagonal().add_(.01 * damped.diag().mean())
+        delta, record = complement_update(before, damped, b, mask, rtol=1e-8, max_iterations=500)
+        with torch.no_grad():
+            full.weight.copy_((before + delta).masked_fill(mask, 0))
         self.assertTrue(torch.equal(full.weight == 0, mask))
         self.assertLessEqual(record["relative_residual"], 1e-8)
         damped_a = a.double() + .01 * a.double().diag().mean() * torch.eye(6, dtype=b.dtype)

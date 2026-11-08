@@ -1,4 +1,24 @@
-name: berman
+seed: 0
 rho: 0.05
 n_sigma: 2.0
+max_steps: 5000
+max_removed: 0.95
+stop_mode: halt
+family: mnist
+name: berman
+validation_split_seed: 12345
 fisher_n: 500
+fisher_seed: 42
+batch_size: 512
+validation_a: 2500
+validation_b: 2500
+methods:
+  classic:
+    per_family: 4
+  discrete:
+    window: 256
+    group_pool: 1
+    max_group: 16
+calibration_sequences: 128
+seqlen: 2048
+selection_check: true

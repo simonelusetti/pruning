@@ -1,4 +1,8 @@
-name: moons
-max_loss_error: 0.01
+defaults:
+- moons
+- _self_
+rho: 0.01
 validation_split_seed: 123
+stop_mode: mark
+max_removed: 0.97
 supervisor_protocol: true

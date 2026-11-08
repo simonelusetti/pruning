@@ -1,4 +1,25 @@
+seed: 123
+rho: 0.05
+n_sigma: 2.0
+max_steps: 100000
+max_removed: 0.95
+stop_mode: halt
+family: local
 name: moons
-max_loss_error: 0.05
 validation_split_seed: 0
-supervisor_protocol: false
+methods:
+  berman:
+    fisher_n: 500
+    fisher_seed: 42
+    batch_size: 128
+  classic:
+    weight_chunk: 1
+    weight_per_site: 8
+    n_struct: 32
+    n_merge: 16
+    refresh_every: 10
+  discrete:
+    fisher_batch: 256
+calibration_sequences: 128
+seqlen: 2048
+selection_check: true

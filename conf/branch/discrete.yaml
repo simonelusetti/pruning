@@ -1,0 +1,12 @@
+name: discrete
+schedule:
+  mode: greedy
+options:
+  lambda_u: 1.0e-08
+  lambda_d: 1.0e-07
+  mu: 0.0001
+  pool: 8
+  time_limit: 60.0
+  gap: 0.01
+  bound: 10.0
+  log: false

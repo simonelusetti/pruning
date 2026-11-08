@@ -1,6 +1,11 @@
-name: sparsegpt_curve
-options:
+defaults:
+- sparsegpt
+- _self_
+schedule:
+  mode: independent
+  targets: null
   fine_spacing: 0.02
   fine_until: 0.2
   coarse_spacing: 0.05
-  max_sparsity: 0.5
+  maximum: 0.5
+  continue_after_rejection: true

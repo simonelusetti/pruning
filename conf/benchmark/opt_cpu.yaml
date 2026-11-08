@@ -1,6 +1,29 @@
+seed: 0
+rho: 0.05
+n_sigma: 2.0
+max_steps: 100000
+max_removed: 0.95
+stop_mode: halt
+family: opt
 name: opt_cpu
 model: facebook/opt-125m
-seed: 0
-nsamples: 8
+dtype: float32
+max_layers: 12
+methods:
+  classic:
+    stats_tokens: 1024
+    stats_sequences: 0
+    calibration_batch_size: 4
+    refresh_every: 5
+    unit_chunk: 32
+    merge_pool: 128
+    merge_chunk: 32
+    rank_chunk: 8
+    weight_chunk: 32768
+    per_family: 3
+calibration_sequences: 8
 seqlen: 512
-eval_tokens: 32768
+selection_check: false
+reporting_dataset: wikitext2_test
+evaluation_tokens: 32768
+tokenizer_fast: true

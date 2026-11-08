@@ -1,3 +1,10 @@
 name: flap
+calibration_refresh: fixed
+calibration_dataset: wikitext2
+schedule:
+  mode: independent
+  targets:
+  - 0.2
 options:
-  sparsity: 0.2
+  percdamp: 0.01
+  blocksize: 128

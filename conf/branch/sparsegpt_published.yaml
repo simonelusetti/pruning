@@ -1,4 +1,10 @@
-name: sparsegpt_published
+defaults:
+- sparsegpt
+- _self_
 options:
   sparsity: 0.5
-  python: null
+  sparsity_type: unstructured
+  zero_shot: false
+  flap_mask_only: false
+  save_model: false
+  allow_version_mismatch: false

@@ -1,8 +1,9 @@
-name: opt
-model: facebook/opt-125m
-seed: 0
-nsamples: 128
-seqlen: 2048
-eval_tokens: 32768
-rho: 0.05
-n_sigma: 2.0
+defaults:
+- opt
+- _self_
+selection_dataset: wikitext2
+selection_offset: 2
+candidate_offset: 0
+reporting_dataset: wikitext2_test
+evaluation_tokens: 32768
+reporting_every: 0

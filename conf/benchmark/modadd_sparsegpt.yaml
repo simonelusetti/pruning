@@ -1,2 +1,4 @@
-name: modadd
-calibration: 512
+defaults:
+- modadd
+- _self_
+calibration_examples: 512

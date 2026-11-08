@@ -1,2 +1,7 @@
 name: classic
-options: {}
+calibration_refresh: fixed
+schedule:
+  targets: null
+  mode: greedy
+options:
+  weights: false

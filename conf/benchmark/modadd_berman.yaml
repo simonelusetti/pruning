@@ -1,4 +1,5 @@
-name: modadd
-rho: 0.05
-n_sigma: 2.0
+defaults:
+- modadd
+- _self_
 fisher_n: 500
+fisher_seed: 42

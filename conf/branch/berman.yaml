@@ -1,2 +1,10 @@
 name: berman
-options: {}
+schedule:
+  targets: null
+  mode: progressive
+  spacing: ${oc.select:benchmark.berman_spacing,0.1}
+  maximum: ${oc.select:benchmark.berman_maximum,0.9}
+options:
+  fisher_n: ${oc.select:benchmark.fisher_n,500}
+  fisher_seed: ${oc.select:benchmark.fisher_seed,42}
+  batch_size: 128

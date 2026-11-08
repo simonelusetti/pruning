@@ -1,0 +1,9 @@
+defaults:
+- continuous
+- _self_
+schedule:
+  mode: progressive
+  maximum: 0.65
+options:
+  deletion_unit: hidden_neuron
+  b_refresh: step

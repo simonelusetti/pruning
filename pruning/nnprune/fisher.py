@@ -17,12 +17,12 @@ class FisherStrategy:
 
 
 PRESETS = {
-    "fisher_general": FisherStrategy(
+    "discrete": FisherStrategy(
         geometry="full", deletion="miqp", compensation="sparse_miqp",
         update_scope="global", structure="reward", decision="validate"),
-    "fisher_sparsegpt": FisherStrategy(
-        geometry="axb", deletion="obs", compensation="sparsegpt",
-        update_scope="layer", structure="post", decision="proxy"),
+    "continuous": FisherStrategy(
+        geometry="axb", deletion="obs", compensation="complement",
+        update_scope="layer", structure="none", decision="validate"),
 }
 
 
@@ -46,11 +46,11 @@ def validate_strategy(strategy: FisherStrategy, backend: str) -> FisherStrategy:
             "decision": {"validate", "proxy"},
         },
         "opt": {
-            "geometry": {"axb", "axi"},
+            "geometry": {"axb"},
             "deletion": {"obs"},
-            "compensation": {"sparsegpt", "complement"},
+            "compensation": {"complement"},
             "update_scope": {"layer"},
-            "structure": {"post", "none"},
+            "structure": {"none", "post"},
             "decision": {"validate", "proxy"},
         },
     }
@@ -62,7 +62,4 @@ def validate_strategy(strategy: FisherStrategy, backend: str) -> FisherStrategy:
             options = ", ".join(sorted(choices))
             raise ValueError(f"{backend} does not support Fisher {field}={value}; "
                              f"choose {options}")
-    if backend == "opt":
-        if strategy.compensation == "complement" and strategy.geometry != "axb":
-            raise ValueError("OPT full-complement compensation requires axb geometry")
     return strategy

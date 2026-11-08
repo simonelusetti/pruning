@@ -13,7 +13,7 @@ from .core import ACTIVE, REMOVED, STEP, Adapter, Move, State, zero_entries
 
 CLASSIC_MOVES = ("unit_sat", "unit_mean", "unit_step", "unit_merge")
 MOVE_GROUPS = {"classic": CLASSIC_MOVES,
-               "fisher": ("fisher",), "fisher_general": ("fisher",)}
+               "fisher": ("fisher",), "discrete": ("fisher",)}
 
 def make_moons_data(n=2500, noise=0.25, seed=123, val_frac=0.2, test_frac=0.2):
     """Train / validation / test.  The scaler is fit on TRAIN only."""
