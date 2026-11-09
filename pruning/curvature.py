@@ -32,7 +32,7 @@ class SecondMoment:
         return self.matrix / self.count
 
 
-def collect_a(layer, hidden, kwargs, names, batch_size=1):
+def collect_a(layer, hidden, kwargs, names, batch_size=1, *, return_hidden=False):
     """Collect OPT input moments, sharing the identical Q/K/V factor."""
     modules = linear_layers(layer)
     owners, groups = {}, {}
@@ -45,12 +45,13 @@ def collect_a(layer, hidden, kwargs, names, batch_size=1):
     handles = [modules[name].register_forward_pre_hook(
         lambda _module, inputs, key=name: stats[key].add(inputs[0])) for name in stats]
     try:
-        forward_layer(layer, hidden, kwargs, batch_size)
+        output = forward_layer(layer, hidden, kwargs, batch_size)
     finally:
         for handle in handles:
             handle.remove()
     factors = {name: value.value() for name, value in stats.items()}
-    return {name: factors[owner] for name, owner in owners.items()}
+    factors = {name: factors[owner] for name, owner in owners.items()}
+    return (factors, output) if return_hidden else factors
 
 
 def estimate_b_covariance(model, sequences, names, max_tokens, seed,

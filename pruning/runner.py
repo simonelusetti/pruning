@@ -10,7 +10,7 @@ from pruning.results import Recorder
 def validate(cfg):
     supported = {"local": {"classic", "berman", "sparsegpt", "discrete"},
                  "mnist": {"classic", "discrete", "berman"},
-                 "opt": {"classic", "continuous", "sparsegpt", "wanda", "flap"},
+                 "opt": {"classic", "continuous", "canonical_sparsegpt", "sparsegpt", "wanda", "flap"},
                  "published": {"sparsegpt", "wanda", "flap"}}
     family, method = cfg.benchmark.family, cfg.branch.name
     if family not in supported or method not in supported[family]:
@@ -86,6 +86,9 @@ def run_experiment(cfg, run):
     elif name == "continuous":
         from pruning.methods.continuous import Continuous
         method = Continuous(problem, options)
+    elif name == "canonical_sparsegpt":
+        from pruning.methods.canonical_sparsegpt import CanonicalSparseGPT
+        method = CanonicalSparseGPT(problem, options)
     elif name == "classic":
         from pruning.methods.classic import OptClassic, MnistClassic
         method = (OptClassic if family == "opt" else MnistClassic)(options, cfg.protocol)
@@ -104,6 +107,7 @@ def run_experiment(cfg, run):
         metadata.update(model=cfg.benchmark.model, model_dtype=cfg.benchmark.dtype,
                         sampling=OmegaConf.to_container(s, resolve=True),
                         parameter_accounting="decoder_linear_weights_and_biases",
+                        total_model_parameters=sum(parameter.numel() for parameter in problem.model.parameters()),
                         pruning_modules=list(problem.names), accounting_modules=list(problem.accounting_names),
                         deletion_unit=options.get("deletion_unit"), calibration={
                             "dataset": s.dataset, "nsamples": s.calibration_sequences,
@@ -111,6 +115,12 @@ def run_experiment(cfg, run):
                             "b_sequences": s.b_sequences if name == "continuous" else None,
                             "b_context": s.b_context if name == "continuous" else None,
                             "b_tokens": problem.settings.b_tokens if name == "continuous" else None})
+        if name == "canonical_sparsegpt":
+            metadata.update(metric="A-based SparseGPT reconstruction", canonicalization="exact MLP cleanup",
+                            completion_refresh="once per progressive proposal",
+                            completion_rule="score *= (remaining_nonzero / group_width) ** completion_power",
+                            compensation="SparseGPT sequential propagation; existing zeros remain fixed",
+                            fc2_statistics="refreshed after fc1 pruning and canonicalization")
     elif family == "local":
         from pruning.models.local import checkpoint_sha256
         metadata["checkpoint_sha256"] = checkpoint_sha256(cfg.benchmark.name)

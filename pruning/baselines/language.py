@@ -35,7 +35,7 @@ class HessianStats:
         x = inp.reshape(-1, inp.shape[-1]).float().T
         self.H *= self.nsamples / (self.nsamples + batch)
         self.nsamples += batch
-        x *= math.sqrt(2 / self.nsamples)
+        x = x * math.sqrt(2 / self.nsamples)
         self.H.addmm_(x, x.T)
 
 

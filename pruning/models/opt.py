@@ -181,6 +181,8 @@ class OptProblem(TorchProblem):
         return self.extra["deleted_neurons"]
 
     def remaining(self):
+        if "pruned_coordinates" in self.extra:
+            return self.total - sum(int(mask.sum()) for mask in self.extra["pruned_coordinates"].values())
         if self.neurons:
             return self.total - neuron_removed_count(self.model, self.deleted_neurons)
         return self.total - (self.initial_nonzero - nonzero_count(self.model, self.layers_count, self.names))

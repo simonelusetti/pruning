@@ -1,0 +1,12 @@
+defaults:
+- sparsegpt
+- _self_
+name: canonical_sparsegpt
+calibration_refresh: step
+schedule:
+  mode: progressive
+  targets: null
+  spacing: 0.05
+  maximum: 0.65
+options:
+  completion_power: 1.0

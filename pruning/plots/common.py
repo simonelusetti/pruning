@@ -20,7 +20,12 @@ class SavedCurve:
 
     @property
     def rows(self):
-        return self.result.get("history", self.result.get("curve", []))
+        rows = self.result.get("history", self.result.get("curve", []))
+        cleanup = self.result.get("posthoc_canonicalization")
+        if cleanup:
+            point = cleanup["point"]
+            return [point if row.get("step") == point["step"] else row for row in rows]
+        return rows
 
     @property
     def config(self):
@@ -29,6 +34,8 @@ class SavedCurve:
 
 def method(config):
     name, options = config.branch.name, config.branch.get("options", {})
+    if name == "canonical_sparsegpt":
+        return "canonical_sparsegpt" if options.completion_power else "canonical_sparsegpt_control"
     if name == "fisher_general":
         return "discrete"
     if name == "fisher_complement":
@@ -39,6 +46,8 @@ def method(config):
         return "sparsegpt" if options.get("geometry") == "axi" else None
     if name in {"continuous", "continuous_neuron"}:
         unit = options.get("deletion_unit", "weight")
+        if unit == "weight" and options.get("deletion_selection") == "global_obs":
+            return "continuous_global"
         return {"weight": "continuous", "hidden_neuron": "continuous_neuron"}.get(unit)
     return name if name in {"classic", "discrete", "berman", "sparsegpt", "wanda", "flap"} else None
 
@@ -54,6 +63,9 @@ def load_curves(store: Path, benchmark: str, *, include_running=False):
             if run.status not in ({"done", "running"} if include_running else {"done"}):
                 continue
             result = json.loads(artifact.read_text())
+            cleanup = run.path / "canonicalization.json"
+            if cleanup.exists():
+                result["posthoc_canonicalization"] = json.loads(cleanup.read_text())
             kind = method(run.experiment.config)
             if kind and (result.get("history") or result.get("curve")):
                 curves.append(SavedCurve(run, result, kind))

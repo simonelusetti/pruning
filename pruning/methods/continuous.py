@@ -80,6 +80,9 @@ class Continuous:
     def __init__(self, problem, options):
         self.options = options
         self.frozen = None
+        self.global_ranking = options.get("deletion_selection", "blockwise_obs") == "global_obs"
+        if options.get("deletion_selection", "blockwise_obs") not in {"blockwise_obs", "global_obs"}:
+            raise ValueError("unknown continuous deletion selection")
         if options.deletion_unit not in {"weight", "hidden_neuron"}:
             raise ValueError("continuous deletion_unit must be weight or hidden_neuron")
         if (min(options.mu, options.percdamp, options.b_damp_ratio) < 0 or
@@ -88,14 +91,100 @@ class Continuous:
         if options.deletion_unit == "hidden_neuron" and (
                 options.mu != 0 or options.b_refresh != "step" or options.get("modules", "all") != "all"):
             raise ValueError("hidden-neuron complements require mu=0 and one factor snapshot per proposal")
-        if options.deletion_unit == "weight" and options.b_refresh not in {"layer", "frozen"}:
+        if self.global_ranking and (options.deletion_unit != "weight" or options.mu != 0 or options.b_refresh != "step"):
+            raise ValueError("global OBS requires weight deletions, mu=0, and one factor snapshot per proposal")
+        if options.deletion_unit == "weight" and not self.global_ranking and options.b_refresh not in {"layer", "frozen"}:
             raise ValueError("weight complements support layer or frozen B")
         if options.b_refresh == "frozen" and problem.sampling.refresh != "fixed":
             raise ValueError("frozen B requires sampling.refresh=fixed")
 
     def propose(self, problem, target, index, progress):
-        return (self.neurons(problem, target, progress) if problem.neurons else
-                self.weights(problem, target, progress))
+        if problem.neurons:
+            return self.neurons(problem, target, progress)
+        return (self.global_weights if self.global_ranking else self.weights)(problem, target, progress)
+
+    @torch.no_grad()
+    def global_weights(self, problem, target, progress):
+        options, model, settings = self.options, problem.model, problem.settings
+        started = time.perf_counter()
+        required = max(0, math.ceil(target * problem.total) - (problem.total - problem.remaining()))
+        modules = [(index, name, linear_layers(layer)[name])
+                   for index, layer in enumerate(model.model.decoder.layers[:problem.layers_count])
+                   for name in problem.names]
+        available = sum(int(module.weight.count_nonzero()) for _, _, module in modules)
+        if required > available:
+            raise ValueError("target exceeds the remaining prunable weights")
+        print(f"Global OBS: snapshot for {required:,} new deletions", flush=True)
+        covariance, counts, b_seconds = estimate_b_covariance(
+            model, problem.b_sequences, problem.names, settings.b_tokens,
+            settings.seed, problem.layers_count, batch_size=settings.b_batch_size,
+            on_sequence=lambda completed, *_: print(
+                f"Global B snapshot: {completed}/{len(problem.b_sequences)} sequences", flush=True))
+        factors = inverse_factors(covariance, counts, options.b_damp_ratio)
+        hidden, kwargs = capture_first_inputs(model, problem.calibration)
+        activations = {}
+        for index, layer in enumerate(model.model.decoder.layers[:problem.layers_count]):
+            local, hidden = collect_a(layer, hidden, kwargs, problem.names,
+                                      settings.activation_batch_size, return_hidden=True)
+            activations.update({(index, name): value for name, value in local.items()})
+            print(f"Global A snapshot: block {index + 1}/{problem.layers_count}", flush=True)
+        del hidden
+        scores = torch.empty(sum(module.weight.numel() for _, _, module in modules),
+                             dtype=torch.float64, device=problem.device)
+        offset = 0
+        for index, name, module in modules:
+            weight = module.weight.double()
+            a = self.damped_a(activations[index, name], weight)
+            a_inverse = torch.cholesky_inverse(torch.linalg.cholesky(a))
+            b_inverse = factors[index, name][1]
+            local = .5 * weight.square() / b_inverse.diag()[:, None] / a_inverse.diag()[None, :]
+            local.masked_fill_(weight == 0, float("inf"))
+            scores[offset:offset + weight.numel()].copy_(local.flatten())
+            offset += weight.numel()
+        selected = torch.topk(scores, required, largest=False, sorted=False).indices
+        score_sum = float(scores[selected].sum())
+        mask = torch.zeros_like(scores, dtype=torch.bool)
+        mask[selected] = True
+        del scores, selected, local, weight, a, a_inverse, b_inverse
+        print(f"Global OBS: selected {required:,} weights; starting local compensation", flush=True)
+        history, offset = [], 0
+        for index, layer in enumerate(model.model.decoder.layers[:problem.layers_count]):
+            layer_started, records = time.perf_counter(), {}
+            for name in problem.names:
+                module = linear_layers(layer)[name]
+                deleted = mask[offset:offset + module.weight.numel()].view_as(module.weight)
+                b, inverse = factors.pop((index, name))
+                records[name] = self.compensate(module, activations.pop((index, name)), b, inverse,
+                                                deleted, f"{index}:{name}")
+                records[name]["deletion_selection"] = "global singleton OBS; one unchanged-model factor snapshot"
+                offset += module.weight.numel()
+            history.append({"layer": index, "modules": records,
+                            "b_estimation_seconds": b_seconds if index == 0 else 0.,
+                            "seconds": time.perf_counter() - layer_started})
+            progress(index + 1, history, 0, time.perf_counter() - started)
+        return {"layers": history, "b_estimation_seconds": b_seconds,
+                "requested_new_deletions": required, "selected_new_deletions": int(mask.sum()),
+                "singleton_score_sum": score_sum, "deletion_selection": "global_obs"}
+
+    def damped_a(self, a, weight):
+        a = a.to(weight)
+        a = ((a + a.T) / 2).clone()
+        a.diagonal().add_(self.options.percdamp * a.diag().mean())
+        return a
+
+    def compensate(self, module, a, b, inverse, mask, label):
+        weight = module.weight.detach().double().clone()
+        a = self.damped_a(a, weight)
+        deleted = mask.to(weight.device) | (weight == 0)
+        delta, record = complement_update(
+            weight, a, b, deleted, mu=self.options.mu, rtol=self.options.cg_rtol,
+            max_iterations=self.options.cg_max_iterations, b_inverse=inverse,
+            progress=lambda iteration, residual: print(
+                f"{label} CG {iteration}, residual {residual:.3g}", flush=True))
+        module.weight.copy_((weight + delta).masked_fill(deleted, 0.).to(module.weight))
+        return record | {"actual_zeros": int(deleted.sum()),
+                         "deleted": int((deleted & (weight != 0)).sum()),
+                         "updates": int(delta.masked_fill(deleted, 0).count_nonzero())}
 
     @torch.no_grad()
     def weights(self, problem, target, progress):
@@ -128,22 +217,10 @@ class Continuous:
                 b, inverse = factors[layer_index, name]
                 mask = blockwise_obs_mask(module, a_factors[name], inverse.diag(),
                                           module_target, options.percdamp, options.blocksize)
-                weight = module.weight.detach().double().clone()
-                a = a_factors[name].to(weight)
-                a = ((a + a.T) / 2).clone()
-                a.diagonal().add_(options.percdamp * a.diag().mean())
-                deleted = mask.to(weight.device) | (weight == 0)
-                delta, record = complement_update(
-                    weight, a, b, deleted, mu=options.mu, rtol=options.cg_rtol,
-                    max_iterations=options.cg_max_iterations, b_inverse=inverse,
-                    progress=lambda iteration, residual: print(
-                        f"{layer_index}:{name} CG {iteration}, residual {residual:.3g}", flush=True))
-                module.weight.copy_((weight + delta).masked_fill(deleted, 0.).to(module.weight))
-                records[name] = record | {"actual_zeros": int(deleted.sum()),
-                                          "module_target_sparsity": module_target,
-                                          "deleted": int((deleted & (weight != 0)).sum()),
-                                          "updates": int(delta.masked_fill(deleted, 0).count_nonzero()),
-                                          "deletion_selection": "blockwise generalized OBS; temporary updates discarded"}
+                records[name] = self.compensate(module, a_factors[name], b, inverse, mask,
+                                                f"{layer_index}:{name}")
+                records[name].update(module_target_sparsity=module_target,
+                                     deletion_selection="blockwise generalized OBS; temporary updates discarded")
             hidden = forward_layer(layer, hidden, kwargs, settings.activation_batch_size)
             history.append({"layer": layer_index, "modules": records,
                             "b_estimation_seconds": b_seconds + (frozen_seconds if layer_index == 0 else 0.),

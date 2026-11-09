@@ -6,7 +6,9 @@ import torch
 @torch.inference_mode()
 def sparsegpt_matrix(weight: torch.Tensor, hessian: torch.Tensor, sparsity: float,
                      percdamp: float = .01, blocksize: int = 128,
-                     output_inverse_diagonal: torch.Tensor | None = None):
+                     output_inverse_diagonal: torch.Tensor | None = None, *,
+                     score_scale: torch.Tensor | None = None,
+                     fixed_mask: torch.Tensor | None = None):
     """SparseGPT's unstructured reconstruction kernel."""
     if not 0 <= sparsity < 1:
         raise ValueError("sparsity must be in [0, 1)")
@@ -15,6 +17,12 @@ def sparsegpt_matrix(weight: torch.Tensor, hessian: torch.Tensor, sparsity: floa
 
     dtype = weight.dtype
     values = weight.float().clone()
+    if score_scale is not None:
+        score_scale = score_scale.to(values).expand_as(values)
+    if fixed_mask is not None and (fixed_mask.shape != weight.shape or fixed_mask.dtype != torch.bool):
+        raise ValueError("fixed deletion mask must match the weight matrix")
+    if fixed_mask is not None:
+        fixed_mask = fixed_mask.to(device=weight.device)
     curvature = hessian.to(device=weight.device, dtype=torch.float32).clone()
     dead = curvature.diag() == 0
     curvature[dead, dead] = 1
@@ -33,8 +41,12 @@ def sparsegpt_matrix(weight: torch.Tensor, hessian: torch.Tensor, sparsity: floa
         metric = current.square() / local_inverse.diag()[None, :].square()
         if output_inverse_diagonal is not None:
             metric = metric / output_inverse_diagonal.to(metric)[:, None].clamp_min(1e-30)
+        if score_scale is not None:
+            metric *= score_scale[:, start:end]
         rank = min(int(metric.numel() * sparsity), metric.numel() - 1)
         mask = metric <= torch.kthvalue(metric.flatten(), rank + 1).values
+        if fixed_mask is not None:
+            mask |= fixed_mask[:, start:end]
 
         for column in range(end - start):
             vector = current[:, column]
