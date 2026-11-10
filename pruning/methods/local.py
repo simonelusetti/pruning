@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import fields
 from pruning.nnprune.core import PruneConfig, refresh, candidates, evaluate_candidates, select_move
-from pruning.nnprune.fisher import resolve_strategy
 
 
 class LocalGreedy:
@@ -12,15 +11,9 @@ class LocalGreedy:
         protocol = cfg.protocol
         values = dict(options)
         weights = values.pop("weights", False)
-        if cfg.branch.name == "discrete":
-            penalties = {f"fisher_{key}": values.pop(key) for key in (
-                "lambda_u", "lambda_d", "mu", "pool", "time_limit", "gap", "bound", "log")}
-            values.update(penalties, weight_per_site=0, struct_kinds=("discrete",),
-                          fisher_strategy=resolve_strategy("discrete"))
-        else:
-            values["struct_kinds"] = ("classic",)
-            if not weights:
-                values["weight_per_site"] = 0
+        values["struct_kinds"] = ("classic",)
+        if not weights:
+            values["weight_per_site"] = 0
         if cfg.benchmark.get("supervisor_protocol", False):
             values.update(screen_n=None, select_admissibility=False, tie_break="k_eff")
             if weights:
@@ -60,12 +53,7 @@ class LocalGreedy:
             return None
         problem.state = chosen["state"]
         self.since += 1
-        if self.ctx.get("fisher_moves"):
-            self.ctx = None
         move = chosen["move"]
-        solver = {key: move.payload.get(key) for key in (
-            "n_deleted", "n_updates", "closure_savings", "search_objective",
-            "solver_objective", "solver_gap", "solver_seconds", "compensation_bound_active")}
         return {"kind": move.kind, "site": move.site, "layer": move.layer,
                 "move": move.describe(), "pred_cost": move.pred_cost,
-                "n_candidates": len(moves), "n_admissible": n_adm, "n_ties": n_ties, **solver}
+                "n_candidates": len(moves), "n_admissible": n_adm, "n_ties": n_ties}

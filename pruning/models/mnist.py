@@ -92,6 +92,8 @@ class MnistProblem(TorchProblem):
         self.initial_nonzero = nonzero(self.model)
 
     def remaining(self):
+        if "pruned_coordinates" in self.extra:
+            return self.masked_remaining()
         return self.total - self.initial_nonzero + nonzero(self.model)
 
     def losses(self, split):
@@ -100,8 +102,3 @@ class MnistProblem(TorchProblem):
     def split_metadata(self, split):
         return {"dataset": "MNIST", "split": split, "count": len(self.splits[split].dataset),
                 "seed": self.cfg.benchmark.validation_split_seed}
-
-    def fisher_data(self, count, seed):
-        generator = torch.Generator().manual_seed(seed)
-        ids = torch.randperm(len(self.train[0]), generator=generator)[:count]
-        return self.train[0][ids].to(self.device), self.train[1][ids].to(self.device)

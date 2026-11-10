@@ -4,6 +4,13 @@ import copy
 import torch
 
 
+def fisher_subset(data, count, seed, device):
+    generator = torch.Generator(device=data[0].device).manual_seed(seed)
+    indices = torch.randperm(len(data[0]), generator=generator, device=data[0].device)
+    indices = indices[:count] if count is not None else indices
+    return tuple(value[indices].to(device) for value in data)
+
+
 class TorchProblem:
     def __init__(self, model):
         self.model = model
@@ -26,3 +33,9 @@ class TorchProblem:
 
     def prepare(self, index):
         return {}
+
+    def fisher_data(self, count, seed):
+        return fisher_subset(self.train, count, seed, self.device)
+
+    def masked_remaining(self):
+        return self.total - sum(int((~mask).sum()) for mask in self.extra["pruned_coordinates"].values())

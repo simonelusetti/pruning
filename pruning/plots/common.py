@@ -44,12 +44,14 @@ def method(config):
         return None
     if name == "fisher_sparsegpt":
         return "sparsegpt" if options.get("geometry") == "axi" else None
+    if name == "discrete_simple" and options.get("penalty_mode") == "fixed" and options.get("permanent_deletions"):
+        return "discrete_simple_global"
     if name in {"continuous", "continuous_neuron"}:
         unit = options.get("deletion_unit", "weight")
         if unit == "weight" and options.get("deletion_selection") == "global_obs":
             return "continuous_global"
         return {"weight": "continuous", "hidden_neuron": "continuous_neuron"}.get(unit)
-    return name if name in {"classic", "discrete", "berman", "sparsegpt", "wanda", "flap"} else None
+    return name if name in {"classic", "discrete", "discrete_simple", "berman", "sparsegpt", "wanda", "flap"} else None
 
 
 def load_curves(store: Path, benchmark: str, *, include_running=False):

@@ -95,3 +95,7 @@ class LocalProblem:
 
     def prepare(self, index):
         return {}
+
+    def fisher_data(self, count, seed):
+        from pruning.models.base import fisher_subset
+        return fisher_subset(self.adapter.data["train"], count, seed, self.state.params[next(iter(self.state.params))].device)

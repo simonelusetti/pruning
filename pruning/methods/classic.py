@@ -471,6 +471,28 @@ class OptClassic:
                 "pred_cost": chosen.proxy, "n_candidates": len(proposals)}
 
 
+def fisher_weight_candidates(problem, x, per_family):
+    from pruning.nnprune.network import Network
+    from pruning.nnprune.fisher_metric import Fisher
+    network = Network(problem, canonicalization=False)
+    diagonal = Fisher(network, x).diagonal()
+    proposals = []
+    for module_name, module in problem.model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        name = f"{module_name}.weight" if module_name else "weight"
+        start, stop = network.offsets[name]
+        score = (.5 * module.weight.detach().double().flatten().square() * diagonal[start:stop])
+        score.masked_fill_(module.weight.detach().flatten() == 0, torch.inf)
+        for index in score.argsort()[:per_family].tolist():
+            def apply(net, name=name, index=index):
+                dict(net.named_parameters())[name].view(-1)[index] = 0
+            proposals.append({"kind": "weight_zero", "label": f"weight_zero:{name}:{index}",
+                              "apply": apply, "fisher_cost": float(score[index]),
+                              "fisher_cost_per_removed": float(score[index])})
+    return proposals
+
+
 class MnistClassic:
     uses_selection = True
 
@@ -478,13 +500,11 @@ class MnistClassic:
         self.cfg, self.protocol = options, protocol
 
     def propose(self, problem, target, index, progress):
-        from pruning.methods.discrete import fisher_factors, weight_zero_candidates
         from pruning.models.mnist import canonicalize
         x, _ = problem.fisher_data(problem.cfg.benchmark.fisher_n, problem.cfg.benchmark.fisher_seed)
         proposals = unit_classic_candidates(problem.model, x, self.cfg.per_family)
         if self.cfg.weights:
-            A, G = fisher_factors(problem.model, x)
-            proposals += weight_zero_candidates(problem.model, A, G, self.cfg.per_family)
+            proposals += fisher_weight_candidates(problem, x, self.cfg.per_family)
         def apply(proposal):
             with torch.no_grad():
                 proposal["apply"](problem.model)

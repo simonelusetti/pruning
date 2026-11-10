@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, ""):
     sys.path.insert(0, str(ROOT))
 
-PLOTTERS = {"opt": "opt", "opt_cpu": "opt", "berman": "berman", "moons": "two_moons", "modadd": "modadd"}
+PLOTTERS = {"opt": "opt", "opt_cpu": "opt", "berman": "berman", "moons": "two_moons", "modadd": "modadd", "network": "network"}
 
 
 def main():

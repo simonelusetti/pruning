@@ -6,6 +6,7 @@ max_removed: 0.95
 stop_mode: halt
 family: opt
 name: opt
+causal: true
 model: facebook/opt-125m
 dtype: float32
 max_layers: 12

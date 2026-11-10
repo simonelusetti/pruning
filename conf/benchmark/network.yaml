@@ -1,0 +1,23 @@
+seed: 0
+rho: 0.05
+n_sigma: 2.0
+max_steps: 5000
+max_removed: 0.95
+stop_mode: halt
+family: network
+name: network
+model:
+  _target_: torch.load
+  f: ???
+  map_location: ${runtime.device}
+  weights_only: false
+data:
+  _target_: torch.load
+  f: ???
+  map_location: cpu
+  weights_only: true
+batch_size: 128
+validation_split_seed: 0
+calibration_sequences: 128
+seqlen: 2048
+selection_check: true

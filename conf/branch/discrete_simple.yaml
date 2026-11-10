@@ -1,0 +1,32 @@
+name: discrete_simple
+schedule:
+  mode: progressive
+  targets: null
+  spacing: 0.10
+  maximum: ${protocol.max_removed}
+options:
+  metric: axb
+  canonicalization: true
+  modules: all
+  parameters: null
+  penalize_bias: true
+  penalty: null
+  penalty_trials: 4
+  penalty_growth: 4.0
+  sparsity_tolerance: 0.01
+  max_iterations: 100
+  max_backtracks: 30
+  rtol: 1.0e-05
+  refit_iterations: 30
+  refit_rtol: 1.0e-05
+  solver_dtype: float32
+  standardize: true
+  likelihood: auto
+  variance: 1.0
+  fisher_n: ${oc.select:benchmark.fisher_n,null}
+  fisher_seed: ${sampling.seed}
+  fisher_batch: 1
+  a_damping: 0.01
+  b_damping: 0.01
+  b_refresh: step
+  causal: ${oc.select:benchmark.causal,false}

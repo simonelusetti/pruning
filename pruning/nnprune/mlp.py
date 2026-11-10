@@ -12,8 +12,7 @@ from .canonicalize.mlp import HiddenLayer, canonicalize_mlp
 from .core import ACTIVE, REMOVED, STEP, Adapter, Move, State, zero_entries
 
 CLASSIC_MOVES = ("unit_sat", "unit_mean", "unit_step", "unit_merge")
-MOVE_GROUPS = {"classic": CLASSIC_MOVES,
-               "fisher": ("fisher",), "discrete": ("fisher",)}
+MOVE_GROUPS = {"classic": CLASSIC_MOVES}
 
 def make_moons_data(n=2500, noise=0.25, seed=123, val_frac=0.2, test_frac=0.2):
     """Train / validation / test.  The scaler is fit on TRAIN only."""
@@ -55,6 +54,15 @@ class MLPAdapter(Adapter):
         self.step_layers = tuple(step_layers)
 
     # ---- construction -------------------------------------------------------
+    def linear_chains(self, state):
+        from .network import LinearChain
+        if any(bool(((state.struct[f"type{layer}"] != ACTIVE) &
+                     (state.struct[f"type{layer}"] != REMOVED)).any()) for layer in range(self.L - 1)):
+            return []
+        return [LinearChain(tuple(f"W{layer}" for layer in range(self.L)),
+                            tuple(f"b{layer}" for layer in range(self.L)),
+                            (torch.sigmoid,) * (self.L - 1))]
+
     def init_params(self, seed=123) -> dict:
         g = torch.Generator().manual_seed(seed)
         P = {}
@@ -141,7 +149,7 @@ class MLPAdapter(Adapter):
         _, acts = self.logits(self.effective(s), s.struct, X, return_acts=True)
         enabled = self.resolve_struct_kinds(cfg.struct_kinds)
         ctx = {"acts": acts, "act_mean": [a.mean(0) for a in acts],
-               "merge_pairs": [[] for _ in acts], "fisher_moves": []}
+               "merge_pairs": [[] for _ in acts]}
 
         if "unit_merge" in enabled and cfg.n_merge:
             for layer, activations in enumerate(acts):
@@ -165,13 +173,10 @@ class MLPAdapter(Adapter):
                             (int(ids[source]), int(ids[target]), alpha, beta,
                              float(scores[index])))
 
-        if "fisher" in enabled:
-            from .fisher_miqp import miqp_moves
-            ctx["fisher_moves"] = miqp_moves(self, s, cfg)
         return ctx
 
     def structural_moves(self, s: State, ctx: dict, cfg) -> list:
-        moves = list(ctx["fisher_moves"])
+        moves = []
         for layer in range(self.L - 1):
             status = s.struct[f"type{layer}"]
             mean = ctx["act_mean"][layer]
@@ -202,14 +207,6 @@ class MLPAdapter(Adapter):
 
     def apply_structural(self, s: State, move: Move) -> bool:
         payload = move.payload
-        if move.kind == "fisher":
-            for name, (indices, delta) in payload["updates"].items():
-                indices = indices.to(s.params[name].device)
-                s.params[name].view(-1)[indices] += delta.to(s.params[name])
-            for name, indices in payload["deleted"].items():
-                zero_entries(s, name, indices.to(s.params[name].device))
-            return True
-
         layer, unit = payload["l"], payload["i"]
         status = s.struct[f"type{layer}"]
         if move.kind in ("unit_sat", "unit_mean"):

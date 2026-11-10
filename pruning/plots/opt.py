@@ -48,6 +48,9 @@ def model_parameter_count(model_name):
 def pruning_capacity(curve):
     import torch
     model = model_blueprint(curve.result["model"])
+    if curve.method.startswith("discrete_simple") and curve.result.get("pruning_parameters"):
+        parameters = dict(model.named_parameters())
+        return sum(parameters[name].numel() for name in curve.result["pruning_parameters"])
     count = curve.config.branch.options.get("max_layers", curve.config.benchmark.get("max_layers", 12))
     scope = pruning_scope(curve)
     names = scope.split(",")
@@ -60,7 +63,7 @@ def pruning_capacity(curve):
                 if isinstance(module, torch.nn.Linear) and (scope == "all" or name in names):
                     capacity += module.weight.numel()
                     if (curve.method == "classic" or
-                            ((curve.method.startswith("canonical_sparsegpt") or curve.result.get("posthoc_canonicalization"))
+                            ((curve.method.startswith("canonical_sparsegpt") or curve.method == "discrete_simple" or curve.result.get("posthoc_canonicalization"))
                              and name == "fc1")) and module.bias is not None:
                         capacity += module.bias.numel()
     return capacity
@@ -89,15 +92,19 @@ def plot(curves, output, trigger=None):
                 and (curve.run.status == "running" or curve.run.path == trigger)):
             selected.append(((curve.method, pruning_scope(curve)), curve))
     names = {"continuous": "Continuous AXB", "continuous_global": "Continuous AXB · global OBS",
+             "discrete_simple": "Discrete simple",
+             "discrete_simple_global": "Canonical L0 · global fixed λ · permanent deletions",
              "continuous_neuron": "Neuron continuous",
              "canonical_sparsegpt": "Canonical SparseGPT",
              "canonical_sparsegpt_control": "Canonical SparseGPT · power 0 control",
              "sparsegpt": "SparseGPT", "classic": "Classic", "wanda": "Wanda", "flap": "FLAP"}
     colors = {"continuous": "#087e94", "continuous_global": "#4264c4",
+              "discrete_simple": "#ab5f16",
+              "discrete_simple_global": "#a84e91",
               "continuous_neuron": "#8051a8", "sparsegpt": "#333333",
               "canonical_sparsegpt": "#c43c64", "canonical_sparsegpt_control": "#73964b",
               "classic": "#2776c4", "wanda": "#bf7635", "flap": "#51945d"}
-    figure, axes = plt.subplots(1, 2, figsize=(17, 6.5), sharey=True)
+    figure, axes = plt.subplots(1, 2, figsize=(17, max(6.5, 1.05 * len(selected))), sharey=True)
     largest, maximum_removed = .25, [0., 0.]
     rho = reference.result.get("selection", {}).get("rho", .05)
     full_total = reference.result.get("total_model_parameters") or model_parameter_count(reference.result["model"])
@@ -111,6 +118,8 @@ def plot(curves, output, trigger=None):
         good = [row for index, row in rows if accepted(curve, index, row)]
         bad = next((row for index, row in rows if not accepted(curve, index, row)), None)
         name = names[kind]
+        if kind == "discrete_simple":
+            name += " · canonical L0" if curve.config.branch.options.get("canonicalization", False) else " · L0 IHT"
         if kind == "canonical_sparsegpt":
             name += f" · power {curve.config.branch.options.completion_power:g}"
         if kind == "continuous_neuron" or modules == "fc1,fc2":
@@ -125,14 +134,14 @@ def plot(curves, output, trigger=None):
         if kind == "classic":
             name += " W+S" if curve.config.branch.options.get("weights", False) else " S"
         budget = f"A {calibration['nsamples']}×{calibration['seqlen']}"
-        if kind.startswith("continuous"):
+        if kind.startswith(("continuous", "discrete_simple")):
             budget += f", B {calibration['b_sequences']}×{calibration['b_context']}"
             full = calibration['b_sequences'] * (calibration['b_context'] - 1)
             if calibration.get('b_tokens', full) not in (0, full):
                 budget += f" ({calibration['b_tokens']} gradients)"
         capacity = pruning_capacity(curve)
         label = f"{name}\n{budget}; held-out {heldout['count']} sequences\nEligible pool: {capacity:,} parameters"
-        if kind.startswith("continuous"):
+        if kind.startswith(("continuous", "discrete_simple")):
             refresh = result.get("method_options", {}).get("b_refresh", curve.config.branch.options.get("b_refresh"))
             label += "\nB refresh: " + {"layer": "per transformer block", "step": "per proposal",
                                           "frozen": "initial snapshot"}.get(refresh, str(refresh))

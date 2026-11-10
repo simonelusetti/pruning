@@ -18,8 +18,6 @@ methods:
     n_struct: 32
     n_merge: 16
     refresh_every: 10
-  discrete:
-    fisher_batch: 256
 calibration_sequences: 128
 seqlen: 2048
 selection_check: true

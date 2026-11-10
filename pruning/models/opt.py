@@ -180,8 +180,26 @@ class OptProblem(TorchProblem):
     def deleted_neurons(self):
         return self.extra["deleted_neurons"]
 
+    def linear_chains(self):
+        from pruning.nnprune.network import LinearChain
+        return [LinearChain((f"model.decoder.layers.{index}.fc1.weight", f"model.decoder.layers.{index}.fc2.weight"),
+                            (f"model.decoder.layers.{index}.fc1.bias", f"model.decoder.layers.{index}.fc2.bias"),
+                            (layer.activation_fn,))
+                for index, layer in enumerate(self.model.model.decoder.layers[:self.layers_count])]
+
+    def affine_modules(self):
+        return {f"model.decoder.layers.{index}.{name}": module
+                for index, layer in enumerate(self.model.model.decoder.layers[:self.layers_count])
+                for name, module in linear_layers(layer).items() if name in self.names}
+
+    def fisher_data(self, count, seed):
+        sequences = self.calibration if count is None else self.calibration[:count]
+        return torch.cat(sequences).to(self.device), None
+
     def remaining(self):
         if "pruned_coordinates" in self.extra:
+            if self.extra.get("pruned_coordinate_convention") == "live":
+                return self.masked_remaining()
             return self.total - sum(int(mask.sum()) for mask in self.extra["pruned_coordinates"].values())
         if self.neurons:
             return self.total - neuron_removed_count(self.model, self.deleted_neurons)
@@ -199,7 +217,7 @@ class OptProblem(TorchProblem):
         started = time.perf_counter()
         redraw = self.calibration is None or sampling.refresh == "step"
         if redraw:
-            needs_b = self.cfg.branch.name == "continuous"
+            needs_b = self.cfg.branch.name in {"continuous", "discrete_simple"}
             count = max(sampling.calibration_sequences, sampling.b_sequences) if needs_b else sampling.calibration_sequences
             context = max(sampling.context, sampling.b_context) if needs_b else sampling.context
             pool = calibration_tokens(self.tokenizer, sampling.dataset, count, context, seed)

@@ -102,6 +102,10 @@ class TransformerAdapter(Adapter):
         self.causal = torch.tril(torch.ones(T, T, dtype=torch.bool))
 
     # ---- construction -------------------------------------------------------
+    def linear_chains(self, state):
+        from .network import LinearChain
+        return [LinearChain(("W_in", "W_out"), ("b_in", "b_out"), (torch.relu,))]
+
     def init_params(self, seed=0) -> dict:
         g = torch.Generator().manual_seed(seed)
         r = lambda *s, std: torch.randn(*s, generator=g) * std

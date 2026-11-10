@@ -11,8 +11,6 @@ import torch.nn.functional as F
 from torch.func import grad, vmap
 from torch.utils.data import DataLoader, TensorDataset
 
-from .fisher import FisherStrategy, resolve_strategy
-
 ACTIVE, REMOVED, STEP = 0, 1, 2
 
 
@@ -52,10 +50,6 @@ class Move:
     pred_cost: float = float("nan")
 
     def describe(self) -> str:
-        if self.kind == "fisher":
-            repair = f"U={self.payload['n_updates']}"
-            return (f"{self.kind}[{self.site}] D={self.payload['n_deleted']} "
-                    f"{repair} K={self.payload['closure_savings']}")
         if self.kind == "zero":
             return f"zero[{self.site}] x{int(self.payload['idx'].numel())}"
         keys = {k: v for k, v in self.payload.items() if not torch.is_tensor(v)}
@@ -169,6 +163,9 @@ class Adapter:
     def canonicalize(self, state: State) -> None:
         pass
 
+    def linear_chains(self, state: State):
+        return []
+
     def structural_moves(self, state: State, ctx: dict, cfg) -> list:
         return []
 
@@ -239,15 +236,6 @@ class PruneConfig:
     screen_n: Optional[int] = None       # train points used by the structural screen (None = all)
     n_mc: int = 1                        # MC label samples for categorical Fisher
     fisher_batch: int = 256
-    fisher_strategy: Optional[FisherStrategy | str] = None
-    fisher_lambda_u: float = 1e-8
-    fisher_lambda_d: float = 1e-7
-    fisher_mu: float = 1e-4
-    fisher_pool: int = 8
-    fisher_time_limit: float = 60.0
-    fisher_gap: float = 0.01
-    fisher_bound: float = 10.0
-    fisher_log: bool = False
     # path
     max_steps: int = 100000
     expand_on_fail: int = 4              # retry with this many times more candidates before stopping
@@ -264,27 +252,6 @@ class PruneConfig:
             raise ValueError("weight_score must be 'obd', 'magnitude' or 'fdist'")
         if self.n_mc < 1:
             raise ValueError("n_mc must be positive")
-        fisher_move = bool(self.struct_kinds and any(
-            name in {"fisher", "discrete"} for name in self.struct_kinds))
-        if fisher_move and any(name not in {"fisher", "discrete"}
-                               for name in self.struct_kinds):
-            raise ValueError("Fisher and Classic candidate pools cannot be mixed")
-        if fisher_move and self.weight_per_site:
-            raise ValueError("Fisher strategies already select scalar deletions")
-        if self.fisher_strategy is not None and not fisher_move:
-            raise ValueError("fisher_strategy requires a Fisher structural move")
-        if self.fisher_strategy is None and fisher_move:
-            self.fisher_strategy = resolve_strategy("discrete")
-        if isinstance(self.fisher_strategy, str):
-            self.fisher_strategy = resolve_strategy(self.fisher_strategy)
-        if min(self.fisher_lambda_u, self.fisher_lambda_d, self.fisher_mu) < 0:
-            raise ValueError("Fisher penalties must be non-negative")
-        if self.fisher_pool < 1:
-            raise ValueError("fisher_pool must be positive")
-        if self.fisher_time_limit <= 0:
-            raise ValueError("fisher_time_limit must be positive")
-        if not 0 <= self.fisher_gap < 1 or self.fisher_bound <= 0:
-            raise ValueError("invalid Fisher gap or compensation bound")
         if self.step_per_unit is not None and self.step_per_unit < 1:
             raise ValueError("step_per_unit must be positive")
         if self.stop_mode not in ("halt", "mark"):

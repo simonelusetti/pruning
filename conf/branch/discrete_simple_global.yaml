@@ -1,0 +1,12 @@
+defaults:
+- discrete_simple
+- _self_
+schedule:
+  mode: greedy
+  targets: null
+  spacing: null
+options:
+  penalty_mode: fixed
+  permanent_deletions: true
+  initial_sparsity: 0.05
+  penalty_trials: 6

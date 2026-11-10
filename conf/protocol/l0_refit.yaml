@@ -1,0 +1,9 @@
+defaults:
+- default
+- _self_
+refit_comparison:
+  source: null
+  target: 0.50
+  proposal_index: 4
+  rtol: 1.0e-06
+  max_iterations: 10000

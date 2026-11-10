@@ -17,8 +17,7 @@ methods:
     per_family: 4
   discrete:
     window: 256
-    group_pool: 1
-    max_group: 16
+    require_deletion: true
 calibration_sequences: 128
 seqlen: 2048
 selection_check: true
