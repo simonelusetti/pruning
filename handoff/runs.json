@@ -1,0 +1,621 @@
+[
+  {
+    "run": "02bb0f40/24290655",
+    "status": "running",
+    "launched_on": "2026-11-05T11:03:42.624653+00:00",
+    "finished_on": null,
+    "method": null,
+    "benchmark": null,
+    "termination_reason": null
+  },
+  {
+    "run": "0c05ada8/7600e995",
+    "status": "done",
+    "launched_on": "2026-10-26T08:39:39.824027+00:00",
+    "finished_on": "2026-10-26T08:40:01.938916+00:00"
+  },
+  {
+    "run": "0e545197/13e81bce",
+    "status": "failed",
+    "launched_on": "2026-11-08T10:07:38.488390+00:00",
+    "finished_on": null
+  },
+  {
+    "run": "0e545197/1fe49cbb",
+    "status": "done",
+    "launched_on": "2026-11-08T10:09:34.763187+00:00",
+    "finished_on": "2026-11-08T10:46:22.432046+00:00",
+    "method": "canonical_sparsegpt",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 9,
+      "removed_percent": 45.18431007226739,
+      "heldout_damage_percent": 5.589932232419237,
+      "loss_damage_percent": 5.108544460726794
+    }
+  },
+  {
+    "run": "1319ffcd/48c26293",
+    "status": "done",
+    "launched_on": "2026-10-26T08:23:34.285164+00:00",
+    "finished_on": "2026-10-26T08:23:36.990969+00:00",
+    "method": "Berman et al. iterative",
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "13d45fcc/dc1b35d4",
+    "status": "done",
+    "launched_on": "2026-11-07T16:37:21.082149+00:00",
+    "finished_on": "2026-11-07T16:50:08.615481+00:00",
+    "method": "Continuous AXB progressive canonical hidden-neuron complement",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 5.000543416892502,
+      "heldout_damage_percent": 0.021178105538988135,
+      "loss_damage_percent": 0.018073765613002557
+    }
+  },
+  {
+    "run": "1754f4b3/368699a1",
+    "status": "failed",
+    "launched_on": "2026-11-07T10:22:04.666393+00:00",
+    "finished_on": null
+  },
+  {
+    "run": "1df41898/4e5e9936",
+    "status": "failed",
+    "launched_on": "2026-11-06T21:43:59.942626+00:00",
+    "finished_on": null
+  },
+  {
+    "run": "1df41898/66eb7abd",
+    "status": "done",
+    "launched_on": "2026-11-06T21:44:38.586474+00:00",
+    "finished_on": "2026-11-06T21:44:54.199330+00:00",
+    "method": null,
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": 144,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "281b868a/6b82c027",
+    "status": "done",
+    "launched_on": "2026-11-07T12:44:57.019136+00:00",
+    "finished_on": "2026-11-07T13:13:42.517893+00:00",
+    "method": "Continuous AXB progressive MLP-neuron dual-module complement",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 4.989642144685336,
+      "heldout_damage_percent": 3.872285728816216,
+      "loss_damage_percent": 4.343675635482391
+    }
+  },
+  {
+    "run": "2aea4107/6950985d",
+    "status": "done",
+    "launched_on": "2026-10-26T08:38:54.169487+00:00",
+    "finished_on": "2026-10-26T08:38:58.193173+00:00"
+  },
+  {
+    "run": "2aea4107/e75073aa",
+    "status": "done",
+    "launched_on": "2026-10-26T08:24:05.306468+00:00",
+    "finished_on": "2026-10-26T08:24:08.371234+00:00"
+  },
+  {
+    "run": "2db7acc1/9e44f892",
+    "status": "done",
+    "launched_on": "2026-11-06T18:41:58.071844+00:00",
+    "finished_on": "2026-11-06T19:03:39.074321+00:00",
+    "method": "Fisher-aware SparseGPT",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "372da298/7f3931f3",
+    "status": "failed",
+    "launched_on": "2026-11-06T09:51:54.332021+00:00",
+    "finished_on": null,
+    "method": "Fisher progressive full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "54163b07/1a8375a8",
+    "status": "done",
+    "launched_on": "2026-11-07T13:31:09.189214+00:00",
+    "finished_on": "2026-11-07T13:46:56.710333+00:00",
+    "method": "Continuous AXB progressive module-output-neuron complement",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "5417dfd5/736cc047",
+    "status": "done",
+    "launched_on": "2026-10-26T08:34:42.479829+00:00",
+    "finished_on": "2026-10-26T08:34:51.029772+00:00",
+    "method": null,
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": 144,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "5417dfd5/f0e5d1d4",
+    "status": "done",
+    "launched_on": "2026-10-26T08:14:21.328376+00:00",
+    "finished_on": "2026-10-26T08:14:30.044365+00:00",
+    "method": null,
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": 144,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "69e99660/0ca1cf14",
+    "status": "done",
+    "launched_on": "2026-11-06T18:41:25.357973+00:00",
+    "finished_on": "2026-11-07T02:25:05.807143+00:00",
+    "method": "Fisher progressive full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": "targets_exhausted",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 49.95955543322794,
+      "heldout_damage_percent": 6.942411106917645,
+      "loss_damage_percent": 6.572819507076311
+    }
+  },
+  {
+    "run": "71df78a9/9b541204",
+    "status": "done",
+    "launched_on": "2026-10-26T08:35:47.947884+00:00",
+    "finished_on": "2026-10-26T08:35:50.968155+00:00",
+    "method": "Berman et al. iterative",
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "817f0f1b/8ab7d7a7",
+    "status": "done",
+    "launched_on": "2026-11-05T11:12:01.978861+00:00",
+    "finished_on": "2026-11-05T12:05:03.373505+00:00",
+    "method": null,
+    "benchmark": null,
+    "termination_reason": null
+  },
+  {
+    "run": "82184f72/eedf1f8b",
+    "status": "failed",
+    "launched_on": "2026-11-09T10:32:36.927558+00:00",
+    "finished_on": null
+  },
+  {
+    "run": "8231843b/2e9abbec",
+    "status": "done",
+    "launched_on": "2026-11-09T15:07:24.953138+00:00",
+    "finished_on": "2026-11-09T15:17:16.206401+00:00",
+    "method": "discrete_simple",
+    "benchmark": "opt",
+    "termination_reason": "targets_exhausted",
+    "last_recorded_accepted": {
+      "step": 1,
+      "removed_percent": 9.451767633995784,
+      "heldout_damage_percent": 0.0015433185880819877,
+      "loss_damage_percent": 0.003932750787960515
+    }
+  },
+  {
+    "run": "830c359e/e417ebdf",
+    "status": "done",
+    "launched_on": "2026-11-07T23:40:58.416878+00:00",
+    "finished_on": "2026-11-08T05:58:53.589756+00:00",
+    "method": "continuous",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 8,
+      "removed_percent": 39.973172613670584,
+      "heldout_damage_percent": 6.4390643947002335,
+      "loss_damage_percent": 5.977923128861318
+    }
+  },
+  {
+    "run": "85e453f0/fdb908f0",
+    "status": "done",
+    "launched_on": "2026-11-07T11:12:50.676414+00:00",
+    "finished_on": "2026-11-07T12:29:47.470373+00:00",
+    "method": "Continuous AXB progressive MLP-neuron complement",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 24.991806402439025,
+      "heldout_damage_percent": 6.566830958418235,
+      "loss_damage_percent": 7.271799934697287
+    }
+  },
+  {
+    "run": "8e035e07/6d5c6077",
+    "status": "done",
+    "launched_on": "2026-11-06T22:11:12.123999+00:00",
+    "finished_on": "2026-11-07T00:42:56.849360+00:00",
+    "method": "SparseGPT (A-only)",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 44.96091515168624,
+      "heldout_damage_percent": 4.180073156559816,
+      "loss_damage_percent": 4.252791184084259
+    }
+  },
+  {
+    "run": "90880b28/d6131d3e",
+    "status": "failed",
+    "launched_on": "2026-11-07T10:24:42.812155+00:00",
+    "finished_on": null,
+    "method": "Continuous AXB progressive FCBQP-refined complement",
+    "benchmark": null,
+    "termination_reason": "user_cancelled",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "90c5b95e/84352f69",
+    "status": "done",
+    "launched_on": "2026-11-06T06:36:58.343160+00:00",
+    "finished_on": "2026-11-06T07:45:15.909205+00:00",
+    "method": "Fisher full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 40.01810213414634,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 3.990897649199554
+    }
+  },
+  {
+    "run": "90c5b95e/fceaeb99",
+    "status": "running",
+    "launched_on": "2026-11-05T14:39:19.041367+00:00",
+    "finished_on": null,
+    "method": "Fisher full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "9fd3746b/fb739d50",
+    "status": "done",
+    "launched_on": "2026-11-06T09:48:06.469946+00:00",
+    "finished_on": "2026-11-06T09:51:37.607056+00:00",
+    "method": "Fisher progressive full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": "targets_exhausted",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 19.98092591840052,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.024902630731804543
+    }
+  },
+  {
+    "run": "a15ac8a0/592287e5",
+    "status": "done",
+    "launched_on": "2026-11-05T11:32:15.798398+00:00",
+    "finished_on": "2026-11-05T11:32:27.942650+00:00",
+    "method": null,
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": 76,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "ab6327ed/048e5610",
+    "status": "failed",
+    "launched_on": "2026-11-09T18:38:43.456307+00:00",
+    "finished_on": null
+  },
+  {
+    "run": "ab6327ed/d8ad0109",
+    "status": "done",
+    "launched_on": "2026-11-09T18:39:46.579728+00:00",
+    "finished_on": "2026-11-09T19:12:40.953379+00:00",
+    "method": "discrete_simple",
+    "benchmark": "opt",
+    "termination_reason": null
+  },
+  {
+    "run": "cc3805e3/9e43a082",
+    "status": "running",
+    "launched_on": "2026-11-05T12:30:03.877228+00:00",
+    "finished_on": null,
+    "method": "Fisher full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 30.266021388512495,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 1.4567257458419691
+    }
+  },
+  {
+    "run": "cf18d2ae/8626942b",
+    "status": "done",
+    "launched_on": "2026-11-06T20:22:19.259918+00:00",
+    "finished_on": "2026-11-06T20:52:50.154950+00:00",
+    "method": "Fisher-aware SparseGPT",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "cf18d2ae/dd26c18f",
+    "status": "failed",
+    "launched_on": "2026-11-06T18:41:32.611657+00:00",
+    "finished_on": null,
+    "method": "Fisher-aware SparseGPT",
+    "benchmark": null,
+    "termination_reason": "solver_or_pruning_error",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 0.0,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.0
+    }
+  },
+  {
+    "run": "d4b5688e/06151a58",
+    "status": "done",
+    "launched_on": "2026-11-09T16:39:46.589687+00:00",
+    "finished_on": "2026-11-09T17:33:55.548285+00:00",
+    "method": "discrete_simple",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 4,
+      "removed_percent": 40.09331361976814,
+      "heldout_damage_percent": 3.3557321345712543,
+      "loss_damage_percent": 2.747156678671403
+    }
+  },
+  {
+    "run": "d5ae143a/9502d0e2",
+    "status": "done",
+    "launched_on": "2026-10-26T08:41:28.892847+00:00",
+    "finished_on": "2026-10-26T08:41:31.913546+00:00",
+    "method": "Berman et al. iterative",
+    "benchmark": "moons",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": null,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": null
+    }
+  },
+  {
+    "run": "d733dd46/d2af78a5",
+    "status": "done",
+    "launched_on": "2026-11-05T12:19:47.074096+00:00",
+    "finished_on": "2026-11-05T12:21:28.613464+00:00",
+    "method": "Fisher full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": "targets_exhausted",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 9.987055361400087,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 0.008496107115707474
+    }
+  },
+  {
+    "run": "de442c03/26ba672a",
+    "status": "done",
+    "launched_on": "2026-11-06T09:59:14.264511+00:00",
+    "finished_on": "2026-11-06T16:00:44.778030+00:00",
+    "method": "Fisher progressive full-layer complement (SparseGPT mask)",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 49.95930136818729,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 6.497547483429367
+    }
+  },
+  {
+    "run": "e4851483/436a2325",
+    "status": "done",
+    "launched_on": "2026-10-26T08:31:08.030895+00:00",
+    "finished_on": "2026-10-26T08:31:29.977330+00:00"
+  },
+  {
+    "run": "e5f30cf6/aba68b3d",
+    "status": "done",
+    "launched_on": "2026-11-08T17:55:01.429652+00:00",
+    "finished_on": "2026-11-08T21:31:11.253507+00:00",
+    "method": "continuous",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 10,
+      "removed_percent": 50.0,
+      "heldout_damage_percent": 5.092627068743494,
+      "loss_damage_percent": 4.4771322489050025
+    }
+  },
+  {
+    "run": "e8772813/a66e081d",
+    "status": "failed",
+    "launched_on": "2026-11-08T13:34:55.594412+00:00",
+    "finished_on": null,
+    "method": "continuous",
+    "benchmark": "opt",
+    "termination_reason": "user_stop",
+    "last_recorded_accepted": {
+      "step": 6,
+      "removed_percent": 30.290125809244202,
+      "heldout_damage_percent": 1.0579915678451401,
+      "loss_damage_percent": 0.805315613042179
+    }
+  },
+  {
+    "run": "ea9a08cb/e3c34771",
+    "status": "failed",
+    "launched_on": "2026-11-09T22:36:18.435654+00:00",
+    "finished_on": null,
+    "method": "discrete_simple",
+    "benchmark": "opt",
+    "termination_reason": null,
+    "last_recorded_accepted": {
+      "step": 100,
+      "removed_percent": 5.730484040951521,
+      "heldout_damage_percent": -0.00025915346624216795,
+      "loss_damage_percent": 0.0004922675723717518
+    }
+  },
+  {
+    "run": "f1662e8f/e0357e84",
+    "status": "done",
+    "launched_on": "2026-11-05T08:27:50.747643+00:00",
+    "finished_on": "2026-11-05T09:49:13.743036+00:00",
+    "method": "Fisher full-layer complement",
+    "benchmark": null,
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": null,
+      "removed_percent": 29.97068136479976,
+      "heldout_damage_percent": null,
+      "loss_damage_percent": 1.7835986002784798
+    }
+  },
+  {
+    "run": "f7f3e536/b43e7d88",
+    "status": "done",
+    "launched_on": "2026-11-07T20:35:04.515975+00:00",
+    "finished_on": "2026-11-07T21:14:24.903498+00:00",
+    "method": null,
+    "benchmark": null,
+    "termination_reason": null
+  },
+  {
+    "run": "f7f3e536/cc25b73a",
+    "read_error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "run": "fa8b51a4/c332da0c",
+    "status": "done",
+    "launched_on": "2026-11-09T19:33:55.106010+00:00",
+    "finished_on": "2026-11-09T22:04:47.468496+00:00",
+    "method": "discrete_simple",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 9,
+      "removed_percent": 45.766504817825954,
+      "heldout_damage_percent": 6.700264962633495,
+      "loss_damage_percent": 5.895771935380134
+    }
+  },
+  {
+    "run": "fafd0f55/d79fcb6c",
+    "status": "done",
+    "launched_on": "2026-11-07T22:19:06.804407+00:00",
+    "finished_on": "2026-11-07T23:10:24.560596+00:00",
+    "method": "continuous",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 5,
+      "removed_percent": 25.000909223501957,
+      "heldout_damage_percent": 8.41317748388306,
+      "loss_damage_percent": 7.737795869429509
+    }
+  },
+  {
+    "run": "fc2e3bbe/b04de127",
+    "status": "done",
+    "launched_on": "2026-11-08T10:46:27.966746+00:00",
+    "finished_on": "2026-11-08T11:22:43.918013+00:00",
+    "method": "canonical_sparsegpt",
+    "benchmark": "opt",
+    "termination_reason": "loss_limit",
+    "last_recorded_accepted": {
+      "step": 9,
+      "removed_percent": 44.97740938346883,
+      "heldout_damage_percent": 4.445467375380963,
+      "loss_damage_percent": 4.227148355396926
+    }
+  }
+]
