@@ -2,28 +2,16 @@ from __future__ import annotations
 
 import math
 import torch
-from pruning.nnprune.factorized_fisher import complement_update
-from pruning.nnprune.canonicalize.gated import GatedGroup, gated_dead, gated_proximal
+from pruning.nnprune.kronecker import dot, masked_cg
+from pruning.nnprune.canonicalize.gated import GatedGroup, gated_dead
 
 
-def initial_curvature(a, b):
-    return max(float(a.diag().max() * b.diag().max()), torch.finfo(a.dtype).tiny)
-
-
-def dot(first, second):
-    return float((first * second).sum(dtype=torch.float64))
-
-
-def support_refit(value, reference, a, b, penalized, iterations, rtol, fixed=None, inverses=None):
-    free = value.ne(0) | ~penalized
-    if fixed is not None:
-        free &= ~fixed
-    delta, record = complement_update(
-        reference, a, b, ~free, rtol=rtol, max_iterations=iterations,
-        initial_update=value-reference,
-        a_inverse=inverses[0] if inverses is not None else None,
-        b_inverse=inverses[1] if inverses is not None else None)
-    return (reference + delta).masked_fill_(~free, 0.), record["iterations"], record["relative_residual"]
+def ordinary(value, penalized, penalty, curvature, neurons_only):
+    """Coordinatewise prox and its cost; with neurons_only, single coefficients are kept and simply charged."""
+    if neurons_only:
+        return value, torch.where(penalized & value.ne(0), penalty, 0.)
+    squared = .5 * curvature * value.square()
+    return value.masked_fill(penalized & squared.le(penalty), 0.), torch.where(penalized, squared.clamp_max(penalty), 0.)
 
 
 def canonical_nonzeros(values, penalized, pair=None):
@@ -54,25 +42,31 @@ def canonical_nonzeros(values, penalized, pair=None):
     return count
 
 
-def proximal_step(z, penalty, curvature, penalized, pair=None, fixed=None):
+def proximal_step(z, penalty, curvature, penalized, pair=None, fixed=None, neurons_only=False):
     if fixed is not None:
         z = {name: value.masked_fill(fixed[name], 0.) for name, value in z.items()}
-    if isinstance(pair, GatedGroup):
-        return gated_proximal(z, penalty, curvature, penalized, pair)
     if pair is not None and isinstance(pair[0], tuple):
-        return chain_proximal(z, penalty, curvature, penalized, pair)
-    values = {name: value.masked_fill(penalized[name] & value.square().le(2 * penalty / curvature), 0.)
-              for name, value in z.items()}
-    if pair is not None:
+        return chain_proximal(z, penalty, curvature, penalized, pair, neurons_only)
+    values, costs = {}, {}
+    for name, value in z.items():
+        values[name], costs[name] = ordinary(value, penalized[name], penalty, curvature, neurons_only)
+    if isinstance(pair, GatedGroup):
+        gate, up, down = (z[name] for name in pair.names)
+        kept = costs[pair.gate].sum(1) + costs[pair.up].sum(1) + costs[pair.down].sum(0)
+        choice = torch.stack((kept, .5 * curvature * gate.square().sum(1), .5 * curvature * up.square().sum(1),
+                              .5 * curvature * down.square().sum(0))).argmin(0)
+        dead = choice.ne(0)
+        values[pair.gate][dead], values[pair.up][dead], values[pair.down][:, dead] = gate[dead], up[dead], down[:, dead]
+        values[pair.gate][choice.eq(1)] = 0
+        values[pair.up][choice.eq(2)] = 0
+        values[pair.down][:, choice.eq(3)] = 0
+    elif pair is not None:
         left, right, fan_in = pair
         incoming, outgoing = z[left], z[right][:, :len(z[left])]
-        costs = {name: torch.where(penalized[name], (.5 * curvature * value.square()).clamp_max(penalty), 0.)
-                 for name, value in z.items()}
-        ordinary = costs[left].sum(1) + costs[right][:, :len(incoming)].sum(0)
+        kept = costs[left].sum(1) + costs[right][:, :len(incoming)].sum(0)
         # A constant or disconnected neuron contributes zero retained coefficients after folding.
-        constant = .5 * curvature * incoming[:, :fan_in].square().sum(1)
-        disconnected = .5 * curvature * outgoing.square().sum(0)
-        choice = torch.stack((ordinary, constant, disconnected)).argmin(0)
+        choice = torch.stack((kept, .5 * curvature * incoming[:, :fan_in].square().sum(1),
+                              .5 * curvature * outgoing.square().sum(0))).argmin(0)
         constant, disconnected = choice.eq(1), choice.eq(2)
         values[left][constant] = incoming[constant]
         values[left][constant, :fan_in] = 0.
@@ -82,10 +76,9 @@ def proximal_step(z, penalty, curvature, penalized, pair=None, fixed=None):
     return values
 
 
-def chain_proximal(z, penalty, curvature, penalized, pairs):
+def chain_proximal(z, penalty, curvature, penalized, pairs, neurons_only):
     states = [torch.zeros(len(z[left]), dtype=torch.long, device=z[left].device) for left, _, _ in pairs]
-    ordinary = {name: value.masked_fill(penalized[name] & (.5 * curvature * value.square()).le(penalty), 0.)
-                for name, value in z.items()}
+    plain = {name: ordinary(value, penalized[name], penalty, curvature, neurons_only)[0] for name, value in z.items()}
 
     def evaluate():
         forced = {name: torch.zeros_like(value, dtype=torch.bool) for name, value in z.items()}
@@ -98,11 +91,9 @@ def chain_proximal(z, penalty, curvature, penalized, pairs):
             exempt[right][:, :len(state)] |= dead[None, :]
         values, costs = {}, {}
         for name, value in z.items():
-            squared = .5 * curvature * value.square()
-            charged = penalized[name] & ~exempt[name]
-            costs[name] = torch.where(forced[name], squared,
-                                     torch.where(charged, squared.clamp_max(penalty), 0.))
-            values[name] = value.masked_fill(forced[name] | (charged & squared.le(penalty)), 0.)
+            kept, cost = ordinary(value, penalized[name] & ~exempt[name], penalty, curvature, neurons_only)
+            costs[name] = torch.where(forced[name], .5 * curvature * value.square(), cost)
+            values[name] = kept.masked_fill(forced[name], 0.)
         return values, costs
 
     # Shared middle matrices couple adjacent hidden layers. Layer-coordinate descent
@@ -121,63 +112,65 @@ def chain_proximal(z, penalty, curvature, penalized, pairs):
         if not changed:
             break
     candidate = evaluate()[0]
+
     def objective(values):
-        return (.5 * curvature * sum(dot(value-z[name], value-z[name]) for name, value in values.items())
+        return (.5 * curvature * sum(float((value - z[name]).square().sum()) for name, value in values.items())
                 + penalty * canonical_nonzeros(values, penalized, pairs))
-    return candidate if objective(candidate) <= objective(ordinary) else ordinary
+    return candidate if objective(candidate) <= objective(plain) else plain
 
 
 @torch.no_grad()
-def minimize_l0(reference, factors, penalty, penalized, options, *, pair=None, fixed=None, inverses=None):
-    """Penalized proximal gradient; a foldable pair has an exact three-way group proximal map."""
-    def product(values):
-        return {name: factors[name][1] @ value @ factors[name][0] for name, value in values.items()}
+def minimize_l0(reference, metric, penalty, penalized, units, options, *, floor, fixed=None,
+                accurate=False, neurons_only=False):
+    """Penalized proximal gradient over canonical units sharing one metric.
 
-    def damage_at(values, gradients):
-        return .5 * sum(dot(values[name] - reference[name], gradient) for name, gradient in gradients.items())
+    The fast solver keeps its step from `floor` (a Lipschitz estimate) and ends with one capped refit; the accurate
+    solver adapts the step from `floor` (the largest diagonal), retries it before accepting stationarity, and requires
+    its support refits to converge."""
+    def gradient(values):
+        return metric.product({name: values[name] - reference[name] for name in values})
+
+    def evaluate(values, gradients):
+        loss = .5 * dot({name: values[name] - reference[name] for name in values}, gradients)
+        return loss, loss + penalty * count(values)
+
+    def count(values):
+        return sum(canonical_nonzeros({name: values[name] for name in names}, {name: penalized[name] for name in names}, pair)
+                   for names, pair in units)
+
+    def prox(z, curvature):
+        result = {}
+        for names, pair in units:
+            result.update(proximal_step({name: z[name] for name in names}, penalty, curvature,
+                                        {name: penalized[name] for name in names}, pair,
+                                        {name: fixed[name] for name in names} if fixed is not None else None, neurons_only))
+        return result
 
     def refit(values):
-        refined, steps, residuals = {}, {}, {}
-        for name, weight in values.items():
-            a, b = factors[name]
-            refined[name], steps[name], residuals[name] = support_refit(
-                weight, reference[name], a, b, penalized[name],
-                options.refit_iterations, options.refit_rtol,
-                fixed[name] if fixed is not None else None,
-                inverses[name] if inverses is not None else None)
-        return refined, steps, residuals
+        free = {name: (value.ne(0) | ~penalized[name]) & (~fixed[name] if fixed is not None else True)
+                for name, value in values.items()}
+        refined, record = masked_cg(metric, reference, values, free, rtol=options.refit_rtol,
+                                    iterations=options.refit_iterations, strict=accurate)
+        refined_gradient = gradient(refined)
+        return refined, refined_gradient, *evaluate(refined, refined_gradient), record
 
-    if options.refit_iterations and inverses is None:
-        inverses = {name: tuple(torch.cholesky_inverse(torch.linalg.cholesky(factor)) for factor in (a, b))
-                    for name, (a, b) in factors.items()}
     value = {name: weight.clone() for name, weight in reference.items()}
-    floor = max(initial_curvature(a, b) for a, b in factors.values())
-    curvature = floor
-    gradient = {name: torch.zeros_like(weight) for name, weight in reference.items()}
-    damage = 0.
-    objective = penalty * canonical_nonzeros(value, penalized, pair)
-    backtracks, converged = 0, False
-    polished, restart = False, False
-    refit_calls, total_refit_steps = 0, {name: 0 for name in value}
-    dtype = next(iter(value.values())).dtype
-    epsilon = 16 * torch.finfo(dtype).eps
+    gradients = {name: torch.zeros_like(weight) for name, weight in reference.items()}
+    loss, objective = 0., penalty * count(value)
+    curvature, backtracks, converged, polished, restart, refits = floor, 0, False, False, False, []
+    epsilon = 16 * torch.finfo(next(iter(value.values())).dtype).eps
     for iteration in range(1, options.max_iterations + 1):
-        curvature = max(floor, curvature / 2)
-        # Before declaring a fixed point, retry the full structured prox at the initial step scale.
-        if restart:
-            curvature = floor
-        restart = False
-        started_at_floor = curvature == floor
+        if accurate:
+            curvature = floor if restart else max(floor, curvature / 2)
+        restart, started_at_floor = False, curvature == floor
         for _ in range(options.max_backtracks):
-            candidate = proximal_step({name: weight - gradient[name] / curvature for name, weight in value.items()},
-                                      penalty, curvature, penalized, pair, fixed)
-            next_gradient = product({name: weight - reference[name] for name, weight in candidate.items()})
+            candidate = prox({name: weight - gradients[name] / curvature for name, weight in value.items()}, curvature)
+            candidate_gradient = gradient(candidate)
             step = {name: weight - value[name] for name, weight in candidate.items()}
-            remainder = sum(dot(step[name], next_gradient[name] - gradient[name]) for name in value)
-            bound = curvature * sum(dot(delta, delta) for delta in step.values())
-            next_damage = damage_at(candidate, next_gradient)
-            next_objective = next_damage + penalty * canonical_nonzeros(candidate, penalized, pair)
-            if (math.isfinite(next_objective) and next_objective <= objective and
+            remainder = dot(step, {name: candidate_gradient[name] - gradients[name] for name in step})
+            bound = curvature * dot(step, step)
+            candidate_loss, candidate_objective = evaluate(candidate, candidate_gradient)
+            if (math.isfinite(candidate_objective) and candidate_objective <= objective and
                     remainder <= bound + epsilon * (abs(remainder) + abs(bound))):
                 break
             curvature *= 2
@@ -185,45 +178,28 @@ def minimize_l0(reference, factors, penalty, penalized, options, *, pair=None, f
         else:
             raise RuntimeError("L0 proximal backtracking could not find a descent step")
         same_support = all(torch.equal(candidate[name].eq(0), weight.eq(0)) for name, weight in value.items())
-        small_step = (sum(dot(delta, delta) for delta in step.values()) <= options.rtol**2 *
-                      max(sum(dot(weight, weight) for weight in value.values()), torch.finfo(dtype).tiny))
-        value, gradient, damage, objective = candidate, next_gradient, next_damage, next_objective
-        if not same_support:
-            polished = False
+        small_step = dot(step, step) <= options.rtol ** 2 * max(dot(value, value), torch.finfo(torch.float64).tiny)
+        value, gradients, loss, objective = candidate, candidate_gradient, candidate_loss, candidate_objective
+        polished &= same_support
         if same_support and small_step:
-            if options.refit_iterations and not polished:
-                refined, steps, _ = refit(value)
-                refit_calls += 1
-                for name, count in steps.items():
-                    total_refit_steps[name] += count
-                refined_gradient = product({name: weight - reference[name] for name, weight in refined.items()})
-                refined_damage = damage_at(refined, refined_gradient)
-                refined_objective = refined_damage + penalty * canonical_nonzeros(refined, penalized, pair)
+            if accurate and options.refit_iterations and not polished:
+                refined, refined_gradient, refined_loss, refined_objective, record = refit(value)
+                refits.append(record)
                 if math.isfinite(refined_objective) and refined_objective <= objective:
-                    value, gradient, damage, objective = refined, refined_gradient, refined_damage, refined_objective
-                polished, restart = True, True
+                    value, gradients, loss, objective = refined, refined_gradient, refined_loss, refined_objective
+                polished = restart = True
                 continue
-            if not started_at_floor:
+            if accurate and not started_at_floor:
                 restart = True
                 continue
             converged = True
             break
-    refit_steps, refit_residual, refit_accepted = {}, {}, False
+    refit_accepted = False
     if options.refit_iterations:
-        refined, refit_steps, refit_residual = refit(value)
-        refit_calls += 1
-        for name, count in refit_steps.items():
-            total_refit_steps[name] += count
-        refined_gradient = product({name: weight - reference[name] for name, weight in refined.items()})
-        refined_damage = damage_at(refined, refined_gradient)
-        refined_objective = refined_damage + penalty * canonical_nonzeros(refined, penalized, pair)
+        refined, _, refined_loss, refined_objective, record = refit(value)
+        refits.append(record)
         if math.isfinite(refined_objective) and refined_objective <= objective:
-            value, damage, objective = refined, refined_damage, refined_objective
-            refit_accepted = True
-    return value, {"iterations": iteration, "proximal_converged": converged,
-                   "backtracks": backtracks, "lipschitz": curvature,
-                   "predicted_fisher_damage": damage, "penalized_objective": objective,
-                   "nonzeros": canonical_nonzeros(value, penalized, pair), "penalty": penalty,
-                   "refit_iterations": refit_steps, "refit_relative_residual": refit_residual,
-                   "refit_accepted": refit_accepted, "refit_calls": refit_calls,
-                   "refit_total_iterations": total_refit_steps}
+            value, loss, objective, refit_accepted = refined, refined_loss, refined_objective, True
+    return value, {"iterations": iteration, "proximal_converged": converged, "backtracks": backtracks,
+                   "lipschitz": curvature, "predicted_fisher_damage": loss, "penalized_objective": objective,
+                   "nonzeros": count(value), "penalty": penalty, "refits": refits, "refit_accepted": refit_accepted}

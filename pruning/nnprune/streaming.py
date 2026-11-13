@@ -1,53 +1,52 @@
 from __future__ import annotations
 
+from pathlib import Path
 import torch
 
 
-def disk_kth(paths, rank, *, device="cpu", chunk_size=8_000_000):
+class Store:
+    """Tensors kept in memory, or spilled to a scratch directory when a model's factors exceed memory."""
+    def __init__(self, directory: Path | None = None):
+        self.directory, self.items = directory, {}
+
+    def __setitem__(self, key, value):
+        if self.directory is None:
+            self.items[key] = value
+        else:
+            path = self.directory / f"{len(self.items)}.pt"
+            torch.save(value, path)
+            self.items[key] = path
+
+    def get(self, key, device):
+        value = self.items[key]
+        return value if self.directory is None else torch.load(value, map_location=device, weights_only=True)
+
+    def __contains__(self, key):
+        return key in self.items
+
+
+def kth(chunks, rank, *, device="cpu", chunk_size=8_000_000):
+    """Smallest threshold whose weighted count of finite values reaches `rank`.
+
+    `chunks()` yields (values, weights or None) pairs and is called once per radix pass, so the scores can
+    live on disk. Nonnegative float64 bit patterns sort like their values."""
     prefix = 0
     for shift in range(56, -1, -8):
-        histogram = torch.zeros(256, dtype=torch.int64, device=device)
-        for path in paths:
-            values = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-            for chunk in values.flatten().split(chunk_size):
-                chunk = chunk.to(device=device, dtype=torch.float64)
-                bits = chunk.view(torch.int64)
-                eligible = chunk.isfinite()
+        histogram = torch.zeros(256, dtype=torch.float64, device=device)
+        for values, weights in chunks():
+            values = values.flatten()
+            weights = torch.ones_like(values, dtype=torch.float64) if weights is None else weights.flatten()
+            for value, weight in zip(values.split(chunk_size), weights.split(chunk_size)):
+                bits = value.to(device=device, dtype=torch.float64).view(torch.int64)
+                eligible = value.to(device).isfinite()
                 if shift < 56:
-                    eligible &= (bits >> (shift+8)) == (prefix >> (shift+8))
-                bins = (bits[eligible] >> shift) & 255
-                histogram += torch.bincount(bins, minlength=256)
+                    eligible &= (bits >> (shift + 8)) == (prefix >> (shift + 8))
+                histogram += torch.bincount((bits[eligible] >> shift) & 255,
+                                            weights=weight.to(device=device, dtype=torch.float64)[eligible], minlength=256)
         cumulative = histogram.cumsum(0)
-        if not 1 <= rank <= int(cumulative[-1]):
-            raise ValueError("Requested score rank exceeds the finite nonnegative scores")
-        bucket = int(torch.searchsorted(cumulative, rank))
-        rank -= int(cumulative[bucket-1]) if bucket else 0
+        if rank > float(cumulative[-1]):
+            raise ValueError("Requested removal exceeds the eligible candidates")
+        bucket = int(torch.searchsorted(cumulative, cumulative.new_tensor(rank)))
+        rank -= float(cumulative[bucket - 1]) if bucket else 0.
         prefix |= bucket << shift
-    return float(torch.tensor(prefix, dtype=torch.int64).view(torch.float64)), rank
-
-
-def disk_masks(paths, rank, output, *, device="cpu", chunk_size=8_000_000):
-    threshold, ties = disk_kth(paths, rank, device=device, chunk_size=chunk_size)
-    masks, total, selected = [], 0., 0
-    for index, path in enumerate(paths):
-        values = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        mask = torch.empty_like(values, dtype=torch.bool, device="cpu")
-        offset = 0
-        for chunk in values.flatten().split(chunk_size):
-            chunk = chunk.to(device)
-            chosen = chunk < threshold
-            equal = chunk == threshold
-            take = min(ties, int(equal.sum()))
-            if take:
-                chosen |= equal & (equal.cumsum(0) <= take)
-            ties -= take
-            mask.flatten()[offset:offset+len(chunk)] = chosen.cpu()
-            total += float(chunk[chosen].sum(dtype=torch.float64))
-            selected += int(chosen.sum())
-            offset += len(chunk)
-        destination = output / f"mask-{index}.pt"
-        torch.save(mask, destination)
-        masks.append(destination)
-    if selected != rank or ties:
-        raise RuntimeError("Disk selection did not produce the requested deletion count")
-    return masks, total
+    return float(torch.tensor(prefix, dtype=torch.int64).view(torch.float64))

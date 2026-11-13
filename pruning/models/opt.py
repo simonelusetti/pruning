@@ -107,32 +107,6 @@ def nonzero_count(model, layers_count, names):
                for name, module in linear_layers(layer).items() if name in names)
 
 
-def neuron_size(layer):
-    return layer.fc1.in_features + int(layer.fc1.bias is not None) + layer.fc2.out_features
-
-
-def neuron_capacity(model, layers_count):
-    return sum(layer.fc1.out_features * neuron_size(layer)
-               for layer in model.model.decoder.layers[:layers_count])
-
-
-def neuron_removed_count(model, deleted):
-    return sum(int(deleted[index].sum()) * neuron_size(layer)
-               for index, layer in enumerate(model.model.decoder.layers[:len(deleted)]))
-
-
-def augmented_linear(module):
-    return (torch.cat((module.weight.detach(), module.bias.detach()[:, None]), 1)
-            if module.bias is not None else module.weight.detach())
-
-
-@torch.no_grad()
-def copy_augmented(module, values):
-    module.weight.copy_(values[:, :module.in_features].to(module.weight))
-    if module.bias is not None:
-        module.bias.copy_(values[:, -1].to(module.bias))
-
-
 def language_splits(cfg, tokenizer, max_positions):
     """Selection, validation, and reporting token windows shared by every method on a language benchmark."""
     sampling = cfg.sampling
@@ -188,13 +162,6 @@ class OptProblem(TorchProblem):
             raise ValueError("accounting_modules must include every pruned module")
         self.total = parameter_count(self.model, self.layers_count, self.accounting_names)
         self.initial_nonzero = nonzero_count(self.model, self.layers_count, self.names)
-        self.neurons = cfg.branch.name == "continuous" and options.deletion_unit == "hidden_neuron"
-        if self.neurons and self.model.config.model_type != "opt":
-            raise ValueError("The OPT hidden-neuron heuristic is not defined for gated LLaMA MLPs")
-        if self.neurons:
-            self.extra["deleted_neurons"] = {
-                index: torch.zeros(layer.fc1.out_features, dtype=torch.bool, device=self.device)
-                for index, layer in enumerate(self.model.model.decoder.layers[:self.layers_count])}
         self.splits, self.metadata = language_splits(cfg, self.tokenizer, self.model.config.max_position_embeddings)
         sampling = self.sampling
         self.calibration = self.b_sequences = None
@@ -202,10 +169,6 @@ class OptProblem(TorchProblem):
                                         OmegaConf.to_container(options, resolve=True))
         self.settings.seed = cfg.benchmark.seed
         self.settings.b_tokens = (sampling.b_tokens or sampling.b_sequences * (sampling.b_context - 1))
-
-    @property
-    def deleted_neurons(self):
-        return self.extra["deleted_neurons"]
 
     def linear_chains(self):
         from pruning.nnprune.network import LinearChain
@@ -231,6 +194,10 @@ class OptProblem(TorchProblem):
                 for index, layer in enumerate(decoder_layers(self.model)[:self.layers_count])
                 for name, module in linear_layers(layer).items() if name in self.names}
 
+    def stage(self, name):
+        """Decoder block of a module, the unit of replay and of streamed factor estimation."""
+        return int(name.removeprefix(layer_prefix(self.model, 0)[:-1]).split(".")[0])
+
     def fisher_data(self, count, seed):
         sequences = self.calibration if count is None else self.calibration[:count]
         return torch.cat(sequences).to(self.device), None
@@ -240,8 +207,6 @@ class OptProblem(TorchProblem):
             if self.extra.get("pruned_coordinate_convention") == "live":
                 return self.masked_remaining()
             return self.total - sum(int(mask.sum()) for mask in self.extra["pruned_coordinates"].values())
-        if self.neurons:
-            return self.total - neuron_removed_count(self.model, self.deleted_neurons)
         return self.total - (self.initial_nonzero - nonzero_count(self.model, self.layers_count, self.names))
 
     @torch.no_grad()
@@ -274,7 +239,7 @@ class OptProblem(TorchProblem):
         started = time.perf_counter()
         redraw = self.calibration is None or sampling.refresh == "step"
         if redraw:
-            needs_b = self.cfg.branch.name in {"continuous", "discrete_simple"}
+            needs_b = self.cfg.branch.get("curvature") == "kfac"
             count = max(sampling.calibration_sequences, sampling.b_sequences) if needs_b else sampling.calibration_sequences
             context = max(sampling.context, sampling.b_context) if needs_b else sampling.context
             pool = calibration_tokens(self.tokenizer, sampling.dataset, count, context, seed)

@@ -1,4 +1,8 @@
+defaults:
+- /settings@_here_: default
+- _self_
 name: discrete
+curvature: fisher
 schedule:
   mode: greedy
 options:
@@ -11,15 +15,8 @@ options:
   group_pool: 1
   max_group: 16
   parameters: null
-  canonicalization: true
-  likelihood: auto
-  variance: 1.0
-  fisher_n: ${oc.select:benchmark.fisher_n,null}
-  fisher_seed: ${oc.select:benchmark.fisher_seed,42}
-  fisher_batch: 16
   require_deletion: ${oc.select:benchmark.methods.discrete.require_deletion,false}
   time_limit: 60.0
   gap: 0.01
   bound: 10.0
   log: false
-label: discrete

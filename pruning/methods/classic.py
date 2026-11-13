@@ -3,15 +3,81 @@ import math
 from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 from pruning.models.opt import linear_layers
 from pruning.nnprune.canonicalize.mlp import canonicalize_linear_chain
 from pruning.models.mnist import linears
-from pruning.curvature import activation_samples
 from pruning.evaluation import paired, choose_candidate
 
 CLASSIC_MOVES = ("unit_off", "unit_mean", "unit_merge", "head_off",
                  "head_mean", "attn_uniform", "qk_rank", "ov_rank")
 ALL_MOVES = CLASSIC_MOVES + ("weight_zero",)
+
+
+@dataclass
+class ActivationStats:
+    mlp_sample: torch.Tensor
+    attn_sample: torch.Tensor
+    mlp_mean: torch.Tensor
+    mlp_second: torch.Tensor
+
+
+@torch.inference_mode()
+def activation_samples(model, sequences, max_tokens: int, batch_size: int):
+    """Summarise every calibration sequence and retain a distributed sample.
+
+    MLP means and second moments use every token.  Correlation-heavy merge and
+    attention proposals use at most ``max_tokens`` positions, sampled evenly
+    from every calibration document instead of taking only the first documents.
+    """
+    layers = model.model.decoder.layers
+    mlp, attn = [[] for _ in layers], [[] for _ in layers]
+    mlp_sum = [None for _ in layers]
+    mlp_sumsq = [None for _ in layers]
+    mlp_count = [0 for _ in layers]
+    quota = max(1, math.ceil(max_tokens / len(sequences)))
+    handles = []
+
+    def distributed_sample(value, have):
+        batch = value.shape[0] if value.ndim > 2 else 1
+        value = value.detach().reshape(batch, -1, value.shape[-1]).float().cpu()
+        take = min(quota, value.shape[1])
+        positions = torch.linspace(0, value.shape[1] - 1, take).long()
+        return value[:, positions].reshape(-1, value.shape[-1])[:max_tokens - have]
+
+    for li, layer in enumerate(layers):
+        def capture_mlp(_module, args, index=li):
+            nonlocal mlp_sum, mlp_sumsq, mlp_count
+            x_all = args[0].detach().reshape(-1, args[0].shape[-1]).float().cpu()
+            total = x_all.sum(0)
+            total_sq = x_all.square().sum(0)
+            mlp_sum[index] = total if mlp_sum[index] is None else mlp_sum[index] + total
+            mlp_sumsq[index] = (total_sq if mlp_sumsq[index] is None
+                                else mlp_sumsq[index] + total_sq)
+            mlp_count[index] += x_all.shape[0]
+            have = sum(x.shape[0] for x in mlp[index])
+            if have < max_tokens:
+                mlp[index].append(distributed_sample(args[0], have))
+
+        def capture_attn(_module, args, index=li):
+            have = sum(x.shape[0] for x in attn[index])
+            if have < max_tokens:
+                attn[index].append(distributed_sample(args[0], have))
+
+        handles.append(layer.fc2.register_forward_pre_hook(capture_mlp))
+        handles.append(layer.self_attn.out_proj.register_forward_pre_hook(capture_attn))
+    try:
+        device = next(model.parameters()).device
+        dataset = TensorDataset(torch.cat(sequences, 0))
+        for (ids,) in DataLoader(dataset, batch_size=batch_size):
+            model.model.decoder(ids.to(device), use_cache=False)
+    finally:
+        for handle in handles:
+            handle.remove()
+    return [ActivationStats(
+        torch.cat(mlp[i], 0), torch.cat(attn[i], 0),
+        mlp_sum[i] / mlp_count[i], mlp_sumsq[i] / mlp_count[i])
+        for i in range(len(layers))]
 
 
 @dataclass

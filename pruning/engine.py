@@ -51,11 +51,6 @@ def run_path(problem, method, protocol, schedule, recorder):
         row.update(selection_loss=float(validation_reference.mean()), loss_damage_percent=0.,
                    val_loss=float(validation_reference.mean()))
     recorder.record(row)
-    trace = None
-    if protocol.get("trace", False):
-        from pruning.diagnostics import ProposalTrace
-        trace = ProposalTrace(problem, recorder, validation_reference)
-    problem.trace = trace
     accepted = row
     failed = False
     reason = "targets_exhausted"
@@ -75,8 +70,6 @@ def run_path(problem, method, protocol, schedule, recorder):
         recorder.active = active
         recorder.write()
         try:
-            if trace is not None:
-                trace.begin(index + 1, target, before)
             details = method.propose(problem, target, index, recorder.progress)
             if details is None:
                 problem.restore(before)
@@ -94,8 +87,6 @@ def run_path(problem, method, protocol, schedule, recorder):
             heldout_seconds = time.perf_counter() - measured
             passed = validation is None or validation["delta"] <= (
                 protocol.n_sigma * validation["se"] + protocol.rho * float(validation_reference.mean()))
-            if trace is not None:
-                trace.finish(passed)
             failed = failed or not passed
             remaining = problem.remaining()
             row = {"step": index + 1, "target_sparsity": target,

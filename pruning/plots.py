@@ -24,7 +24,7 @@ def load_runs(store: Path, benchmark: str, *, include_running=False):
                     run.status not in ({"done", "running"} if include_running else {"done"})):
                 continue
             result = json.loads(artifact.read_text())
-            name = config.branch.get("label", config.branch.name)
+            name = result.get("label") or config.branch.get("label", config.branch.name)
             if result.get("curve") and (name not in latest or run.launched_on > latest[name][0].launched_on):
                 latest[name] = run, result
         except (OSError, ValueError, KeyError) as error:
@@ -50,7 +50,7 @@ def amount(value, unit):
 
 # Validated categorical order (adjacent CVD separation); a ninth method reuses hues with a dotted line.
 PALETTE = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
-OURS = ("classic", "discrete", "continuous", "canonical", "fisher")
+OURS = ("classic", "discrete", "continuous")
 
 
 def styles(names):

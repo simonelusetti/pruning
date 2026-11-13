@@ -1,4 +1,5 @@
 name: reference
+scope: global
 calibration_refresh: fixed
 schedule:
   mode: independent
@@ -12,4 +13,3 @@ options:
   fisher_n: ${oc.select:benchmark.fisher_n,null}
   fisher_seed: ${oc.select:benchmark.fisher_seed,42}
   batch_size: 32
-label: reference

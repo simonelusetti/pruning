@@ -3,8 +3,10 @@ from __future__ import annotations
 from fnmatch import fnmatchcase
 import math
 import torch
+from pruning.methods.kfac import validate
 from pruning.nnprune.network import Network
-from pruning.nnprune.fisher_metric import Fisher
+from pruning.nnprune.fisher_metric import Fisher, KroneckerMetric
+from pruning.nnprune.kronecker import kronecker_factors
 
 
 def logical(model, kind, terms, name):
@@ -74,55 +76,49 @@ def canonical_retained(model, network, deletion, *, fixed_zeros=True):
     return retained, {index: available(index) for index in retained}
 
 
-def candidate_pool(network, diagonal, options):
-    eligible = []
-    protected = {name for chain in network.chains for name in chain.biases[1:] if name}
-    for name, value in network.parameters.items():
-        patterns = [options.parameters] if isinstance(options.parameters, str) else options.parameters
-        selected = value.ndim >= 2 if patterns is None else any(fnmatchcase(name, pattern) for pattern in patterns)
-        if selected:
-            if name in protected:
-                raise ValueError(f"{name} is a constant-folding target; keep its bias outside deletion candidates")
-            eligible.append(network.indices(name).flatten())
+def candidate_pool(network, diagonal, options, deletable, pool, group_pool, max_group):
+    patterns = [options.parameters] if isinstance(options.parameters, str) else options.parameters
+    eligible = [network.indices(name).flatten() for name, value in network.parameters.items()
+                if patterns is None or value.ndim < 2 or any(fnmatchcase(name, pattern) for pattern in patterns)]
     if not eligible:
         return []
     eligible = torch.cat(eligible)
-    eligible = eligible[network.live[eligible] & network.theta[eligible].ne(0)]
+    eligible = eligible[network.live[eligible] & network.theta[eligible].ne(0) & deletable[eligible]]
     eligible_mask = torch.zeros_like(network.live)
     eligible_mask[eligible] = True
     score = .5 * network.theta.square() * diagonal
     order = eligible[torch.argsort(score[eligible])]
     groups = []
-    for chain in network.chains if options.group_pool else ():
+    for chain in network.chains if group_pool else ():
         for name in chain.weights[1:]:
             for column in network.indices(name).T:
                 group = column[network.live[column] & network.theta[column].ne(0)]
-                if not 0 < len(group) <= options.max_group or not bool(eligible_mask[group].all()):
+                if not 0 < len(group) <= max_group or not bool(eligible_mask[group].all()):
                     continue
                 savings = network.closure(group)
                 groups.append((float(score[group].sum()) / max(1, savings), group))
     groups.sort(key=lambda item: item[0])
     structural, reserved = [], torch.zeros_like(network.live)
     for _, group in groups:
-        if len(structural) >= options.group_pool:
+        if len(structural) >= group_pool:
             break
         if not bool(reserved[group].any()):
             structural.append(group)
             reserved[group] = True
     order = order[~reserved[order]]
-    blocks = list(order[:options.pool * options.window].split(options.window)) + structural
+    blocks = list(order[:pool * options.window].split(options.window)) + structural
     return [block for block in blocks if block.numel()]
 
 
-def solve(network, fisher, options):
+def solve(network, fisher, options, allowed, deletable, pool, group_pool, max_group):
     import gurobipy as gp
     diagonal = fisher.diagonal()
-    blocks = candidate_pool(network, diagonal, options)
+    blocks = candidate_pool(network, diagonal, options, deletable, pool, group_pool, max_group)
     if not blocks:
         return None
     deletion_pool = torch.cat(blocks)
     correlations = fisher.correlations(deletion_pool).abs() / (diagonal + options.mu).sqrt().clamp_min(1e-15)
-    correlations.masked_fill_(~network.live | network.theta.eq(0), -torch.inf)
+    correlations.masked_fill_(~network.live | network.theta.eq(0) | ~allowed, -torch.inf)
     count = min(options.update_pool, int((network.live & network.theta.ne(0)).sum()))
     updates = correlations.topk(count).indices
     q = fisher.quadratic(blocks, updates)
@@ -200,31 +196,51 @@ def solve(network, fisher, options):
 class Discrete:
     uses_selection = False
 
-    def __init__(self, problem, options):
-        self.options = options
-        if (min(options.lambda_u, options.lambda_d, options.mu) < 0 or
-                min(options.pool, options.window, options.max_group, options.fisher_batch) < 1 or
-                min(options.group_pool, options.update_pool) < 0 or options.time_limit <= 0 or
-                not 0 <= options.gap < 1 or options.bound <= 0 or
-                options.variance <= 0 or options.likelihood not in {"auto", "bernoulli", "categorical", "gaussian"} or
-                (options.fisher_n is not None and options.fisher_n < 1)):
+    def __init__(self, problem, branch):
+        validate(branch, curvatures=("fisher", "kfac"), scopes=("global",))
+        options = self.options = branch.options
+        self.branch, self.estimation = branch, branch.estimation
+        if (min(options.lambda_u, options.lambda_d, options.mu) < 0 or min(options.window, options.max_group) < 1 or
+                min(options.pool, options.group_pool, options.update_pool) < 0 or options.time_limit <= 0 or
+                not 0 <= options.gap < 1 or options.bound <= 0):
             raise ValueError("invalid discrete optimizer settings")
-        network = Network(problem, options.canonicalization)
+        if branch.curvature == "kfac" and not hasattr(problem, "model"):
+            raise ValueError("K-FAC curvature needs a PyTorch model")
+        network = Network(problem, canonicalization=True)
         if hasattr(problem, "extra"):
             problem.extra["pruned_coordinates"] = network.masks
         self.chains = network.chains
+        # Neuron candidates are outgoing columns of canonical chains; weight candidates are scalar blocks.
+        self.pool = 0 if branch.unit == "neuron" else options.pool
+        self.group_pool = 0 if branch.unit == "weight" else options.pool if branch.unit == "neuron" else options.group_pool
+        self.max_group = float("inf") if branch.unit == "neuron" else options.max_group
 
     def propose(self, problem, target, index, progress):
-        options = self.options
+        options, estimation = self.options, self.estimation
         network = Network(problem, canonicalization=False)
-        network.chains = self.chains
-        x, _ = problem.fisher_data(options.fisher_n, options.fisher_seed)
-        fisher = Fisher(network, x, batch_size=options.fisher_batch,
-                        likelihood=options.likelihood, variance=options.variance)
-        result = solve(network, fisher, options)
+        network.chains = self.chains if self.branch.unit != "weight" else []
+        x, _ = problem.fisher_data(estimation.n, estimation.seed)
+        allowed = torch.ones_like(network.live)
+        if not self.branch.affine:
+            for name, value in network.parameters.items():
+                if value.ndim < 2:
+                    allowed[network.indices(name).flatten()] = False
+        if self.branch.curvature == "kfac":
+            modules = {name: module for name, module in problem.model.named_modules() if type(module) is torch.nn.Linear}
+            fisher = KroneckerMetric(network, kronecker_factors(problem.model, x, estimation, modules), estimation.likelihood)
+            allowed &= fisher.covered
+        else:
+            fisher = Fisher(network, x, batch_size=estimation.batch, likelihood=estimation.likelihood, variance=estimation.variance)
+        # Downstream biases absorb folded constants: they may compensate but are never deleted.
+        deletable = allowed.clone()
+        for chain in self.chains:
+            for bias in filter(None, chain.biases[1:]):
+                deletable[network.indices(bias).flatten()] = False
+        result = solve(network, fisher, options, allowed, deletable, self.pool, self.group_pool, self.max_group)
         if result is None:
             return None
         deleted, updates, values, record = result
+        network.chains = self.chains
         network.apply(deleted, updates, values)
         record["actual_savings"] = int(network.live.sum()) - sum(int(mask.sum()) for mask in network.masks.values())
         return record

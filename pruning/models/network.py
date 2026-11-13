@@ -28,7 +28,8 @@ class NetworkProblem(TorchProblem):
     @torch.inference_mode()
     def losses(self, split):
         losses = []
-        mode = self.cfg.branch.options.get("likelihood", "auto")
+        estimation = self.cfg.branch.get("estimation", {})
+        mode = estimation.get("likelihood", "auto")
         for x, y in DataLoader(TensorDataset(*self.splits[split]), batch_size=self.cfg.benchmark.batch_size):
             output, y = self.model(x.to(self.device)), y.to(self.device)
             output = output.logits if hasattr(output, "logits") else output
@@ -38,7 +39,7 @@ class NetworkProblem(TorchProblem):
             elif likelihood == "bernoulli":
                 loss = F.binary_cross_entropy_with_logits(output, y.to(output).reshape_as(output), reduction="none")
             else:
-                variance = self.cfg.branch.options.variance
+                variance = estimation.variance
                 loss = .5 * ((output - y.reshape_as(output)).square() / variance + torch.log(output.new_tensor(2 * torch.pi * variance)))
             losses.append(loss.reshape(len(x), -1).mean(1).cpu())
         return torch.cat(losses).double()

@@ -7,4 +7,3 @@ max_removed: ${benchmark.max_removed}
 stop_mode: ${benchmark.stop_mode}
 save_model: false
 reporting_every: ${oc.select:benchmark.reporting_every,1}
-trace: false

@@ -16,20 +16,16 @@ A baseline is a published method together with the model and data it was publish
 
 SparseGPT, Wanda, FLAP, SliceGPT, LLM-Pruner, and Kwon et al. are the stronger baselines listed in the supervisor's archived draft (`sources/original code/paper/main.tex`, outlook item 3); its shared short fine-tuning budget is not implemented. The LLaMA papers' `decapoda-research/llama-7b-hf` checkpoint has been removed from Hugging Face. All LLaMA presets use `huggyllama/llama-7b`, a mirror of the same LLaMA-7B weights; `specs.py` and the benchmark configs record the paper checkpoint as `paper_model`. Each matched benchmark selects its paper's sampling preset (`wanda`, `flap`, `slicegpt`, `llm_pruner`), so their contexts, calibration sets, and full WikiText2 test windows follow the native evaluation. Our held-out loss is the mean of equal-length window losses; its exponential is the perplexity the native programs print. Our runs additionally need a validation split for the stop rule; `llama_llm_pruner` uses WikiText2 validation windows because BookCorpus has no held-out split. BookCorpus calibration reads the same archive as the hub loading script, which `datasets` 4 no longer executes. Native outputs are scored in the benchmark's dtype, like every other method.
 
-The authors' [Wanda example](https://github.com/locuslab/wanda#usage) uses LLaMA-7B with 50% unstructured sparsity. The [FLAP example](https://github.com/CASIA-LMC-Lab/FLAP#configuration-instruction) uses LLaMA-7B with about 20% structured removal, WIFV, AL-AM, and 1,024 calibration examples. These are external methods to compare against our `classic`, `discrete`, and `continuous` branches. Running all methods on one identical checkpoint, data protocol, and removal budget is a separate controlled comparison from reproducing each paper's native setup. Current internal `wanda` and `flap` presets use OPT; `wanda_global` is the notebook's global-ranking control and has a different selection rule from published Wanda.
+The authors' [Wanda example](https://github.com/locuslab/wanda#usage) uses LLaMA-7B with 50% unstructured sparsity. The [FLAP example](https://github.com/CASIA-LMC-Lab/FLAP#configuration-instruction) uses LLaMA-7B with about 20% structured removal, WIFV, AL-AM, and 1,024 calibration examples. These are external methods to compare against our `classic`, `discrete`, and `continuous` branches. Running all methods on one identical checkpoint, data protocol, and removal budget is a separate controlled comparison from reproducing each paper's native setup. Current internal `wanda` and `flap` presets use OPT; `reference` with `score=wanda scope=global` is the notebook's global-ranking control and has a different selection rule from published row-wise Wanda.
 
 `classic` is our neural extension of the supervisor's boundary-pruning framework. The SR paper's `zero_only`, `sloppy_only`, and `bic_only` operators are not separate neural competitors in this repository.
 
 
-The supervisor's [NNpruning notes](../../sources/NNpruning%20%E2%80%94%20working%20notes.pdf), archived [notebook](../../sources/original%20code/NNpruning.ipynb), and [core](../../sources/original%20code/nnprune/core.py) define the following additional presets. Each is an alternative in the same `branch` config group.
+The supervisor's [NNpruning notes](../../sources/NNpruning%20%E2%80%94%20working%20notes.pdf), archived [notebook](../../sources/original%20code/NNpruning.ipynb), and [core](../../sources/original%20code/nnprune/core.py) define the ranking controls and the Berman schemes below.
 
 | `branch=` | Behaviour |
 | --- | --- |
-| `reference` | Frozen global absolute-weight ranking (magnitude score); independent dense-model sparsity points |
-| `obd` | Archived OBD-style score `-gradient * weight + 0.5 * Fisher_diagonal * weight²`; frozen ranking |
-| `wanda_global` | Archived global activation-norm ranking; distinct from published rowwise `wanda` |
-| `random` | Frozen seeded random ranking |
-| `mean_ablation` | Dense-model order by contribution variance; replace one unit/head by its current mean and fold downstream |
+| `reference` | Uncompensated ranking: `options.score` magnitude (default), `wanda` (`abs(W) · norm(x)`) or `random`; `scope=global` ranks all pruned tensors together, `local` removes the target fraction from each tensor |
 | `berman_one_shot` | Frozen `sqrt(F(theta)) * abs(theta)` ranking; independent points |
 | `berman_iterative` | Recompute that score on the accepted model each step |
 | `berman_global` | `abs(theta) * mean_alpha sqrt(F(alpha * theta))`, scaling every parameter |
@@ -37,15 +33,13 @@ The supervisor's [NNpruning notes](../../sources/NNpruning%20%E2%80%94%20working
 | `berman_magnitude` | Author-style magnitude control, all eligible parameters, independent points |
 | `berman_fim` | Author-style Fisher-diagonal-only control, independent points |
 
-Ranked baselines use no compensation or retraining. The original OBD implementation retains its first-order term and uses model Fisher, rather than claiming an exact Hessian implementation of historical OBD. The local implementation retains the archive's Fisher/gradient estimates; the supervised PyTorch implementation streams exact class expectations for the Fisher diagonal and a full-training mean gradient. `branch.options.refresh=step` with `branch.schedule.mode=progressive` selects an iterative ranking. Biases are excluded by default from the ranked weight baselines; `include_bias=true` includes them for PyTorch models. Local adapter pruning scopes follow the archive. Structural cascades for local ranked/Berman reporting are evaluated on a copy and do not alter the running baseline.
+Ranked baselines use no compensation or retraining. `branch.options.refresh=step` with `branch.schedule.mode=progressive` selects an iterative ranking. Biases are excluded by default; `include_bias=true` includes them for PyTorch models. Local adapter pruning scopes follow the archive. Structural cascades for local ranked/Berman reporting are evaluated on a copy and do not alter the running baseline.
 
 Berman's path schemes use the vendored Fisher routines and the archived formulas, three quadrature points, and a 500-example training subset with seed 42 by default. The new Berman presets protect the modular-addition positional embedding, following the archived comparison. The older `branch=berman` retains its historical scope. `avg_points`, `probe_batch`, `sample_chunk`, subset size, and batching remain config settings. The coordinate-path scheme probes every active coefficient and can be expensive; the archive did not run it on modular addition. No new baseline experiment is launched merely by composing a config.
 
-Magnitude, random and global Wanda-style rankings also support OPT's selected affine modules. Exact-diagonal OBD and mean-ablation support the local benchmarks and supervised MLPs; OPT retains its separate Wanda/FLAP implementations and published wrappers. The local classic menu presets use the existing moons/modadd adapters; saturation/step moves require the sigmoid MLP.
-
 ```bash
-forge run benchmark=berman branch=discrete_simple_fast branch.options.fisher_batch=128 branch.options.fisher_seed=42 runtime.device=cuda:0
-forge run benchmark=berman branch=continuous_global_affine branch.options.fisher_batch=128 branch.options.fisher_seed=42 branch.schedule.maximum=0.95 runtime.device=cuda:0
+forge run benchmark=berman branch=discrete_simple runtime.device=cuda:0
+forge run benchmark=berman branch=continuous runtime.device=cuda:0
 forge run benchmark=moons branch=reference
 forge run benchmark=modadd branch=berman_global
 ```

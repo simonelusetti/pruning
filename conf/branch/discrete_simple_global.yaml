@@ -1,13 +1,12 @@
 defaults:
-- discrete_simple_accurate
+- discrete_simple
 - _self_
+name: discrete_simple_global
 schedule:
   mode: greedy
-  targets: null
-  spacing: null
 options:
-  penalty_mode: fixed
-  permanent_deletions: true
+  solver: accurate
+  refit_iterations: 2000
+  refit_rtol: 1.0e-06
+  solver_dtype: float64
   initial_sparsity: 0.05
-  penalty_trials: 6
-label: discrete_simple_global

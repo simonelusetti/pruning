@@ -1,6 +1,0 @@
-defaults:
-- continuous_global_affine
-- _self_
-options:
-  factor_backend: streaming
-label: continuous_global_affine_streaming

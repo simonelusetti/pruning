@@ -66,9 +66,48 @@ class Fisher:
         values, vectors = torch.linalg.eigh((result + result.T) / 2)
         return (vectors * values.clamp_min(0)) @ vectors.T
 
-    def matrix(self, coordinates):
-        result = self.network.theta.new_zeros((len(coordinates), len(coordinates)))
-        for rows in self.batches():
-            local = rows[:, coordinates]
-            result += local.T @ local
-        return (result + result.T) / 2
+
+
+class KroneckerMetric:
+    """The Fisher interface above with block-diagonal K-FAC curvature; coordinates outside affine modules are uncovered."""
+    def __init__(self, network, factors, likelihood):
+        self.network, self.factors, self.likelihood = network, factors, likelihood
+        self.index, self.covered = {}, torch.zeros_like(network.live)
+        for name, (a, _) in factors.items():
+            index = network.indices(f"{name}.weight")
+            if a.shape[0] > index.shape[1]:
+                index = torch.cat((index, network.indices(f"{name}.bias")[:, None]), 1)
+            self.index[name] = index
+            self.covered[index.flatten()] = True
+
+    def product(self, vector):
+        result = torch.zeros_like(vector)
+        for name, index in self.index.items():
+            a, b = self.factors[name]
+            result[index] = b @ vector[index] @ a
+        return result
+
+    def diagonal(self):
+        result = torch.zeros_like(self.network.theta)
+        for name, index in self.index.items():
+            a, b = self.factors[name]
+            result[index] = b.diag()[:, None] * a.diag()[None, :]
+        return result
+
+    def correlations(self, deleted):
+        vector = torch.zeros_like(self.network.theta)
+        vector[deleted] = self.network.theta[deleted]
+        return self.product(vector)
+
+    def quadratic(self, blocks, updates):
+        columns = []
+        for block in blocks:
+            columns.append(torch.zeros_like(self.network.theta))
+            columns[-1][block] = -self.network.theta[block]
+        for index in updates.tolist():
+            columns.append(torch.zeros_like(self.network.theta))
+            columns[-1][index] = 1.
+        design = torch.stack(columns, 1)
+        result = design.T @ torch.stack([self.product(column) for column in columns], 1)
+        values, vectors = torch.linalg.eigh((result + result.T) / 2)
+        return (vectors * values.clamp_min(0)) @ vectors.T

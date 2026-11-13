@@ -1,6 +1,0 @@
-defaults:
-- reference
-- _self_
-options:
-  score: random
-label: random

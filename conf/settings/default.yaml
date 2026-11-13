@@ -1,0 +1,21 @@
+# Shared by discrete, discrete_simple and continuous; the meanings are documented in pruning/methods/kfac.py.
+scope: global
+replay: false
+unit: both
+affine: true
+curvature: kfac
+factor_backend: memory
+estimation:
+  n: ${oc.select:benchmark.fisher_n,null}
+  seed: ${oc.select:benchmark.fisher_seed,42}
+  batch: 16
+  likelihood: auto
+  variance: 1.0
+  a_damping: 0.01
+  b_damping: 0.01
+  causal: ${oc.select:benchmark.causal,false}
+schedule:
+  mode: progressive
+  targets: null
+  spacing: 0.05
+  maximum: ${protocol.max_removed}
