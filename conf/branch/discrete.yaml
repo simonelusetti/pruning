@@ -22,3 +22,4 @@ options:
   gap: 0.01
   bound: 10.0
   log: false
+label: discrete

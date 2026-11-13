@@ -11,7 +11,7 @@ class LocalGreedy:
         protocol = cfg.protocol
         values = dict(options)
         weights = values.pop("weights", False)
-        values["struct_kinds"] = ("classic",)
+        values.setdefault("struct_kinds", ("classic",))
         if not weights:
             values["weight_per_site"] = 0
         if cfg.benchmark.get("supervisor_protocol", False):

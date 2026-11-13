@@ -12,3 +12,4 @@ options:
   cg_max_iterations: 10000
   b_damp_ratio: 0.01
   b_refresh: layer
+label: continuous

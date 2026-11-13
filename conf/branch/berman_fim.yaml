@@ -1,0 +1,6 @@
+defaults:
+- berman_one_shot
+- _self_
+options:
+  scheme: fim
+label: berman_fim

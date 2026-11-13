@@ -2,8 +2,10 @@ name: wanda
 calibration_refresh: fixed
 schedule:
   mode: independent
-  targets:
-  - 0.5
+  targets: null
+  spacing: 0.05
+  maximum: ${protocol.max_removed}
 options:
   percdamp: 0.01
   blocksize: 128
+label: wanda

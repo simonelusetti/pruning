@@ -10,3 +10,4 @@ schedule:
   maximum: 0.65
 options:
   completion_power: 1.0
+label: canonical_sparsegpt

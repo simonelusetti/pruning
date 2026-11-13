@@ -3,3 +3,4 @@ defaults:
 - _self_
 options:
   weights: true
+label: classic_weights

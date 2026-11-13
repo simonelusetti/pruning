@@ -3,8 +3,10 @@ calibration_refresh: fixed
 calibration_dataset: wikitext2
 schedule:
   mode: independent
-  targets:
-  - 0.2
+  targets: null
+  spacing: 0.05
+  maximum: ${protocol.max_removed}
 options:
   percdamp: 0.01
   blocksize: 128
+label: flap

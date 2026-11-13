@@ -30,16 +30,21 @@ def run_path(problem, method, protocol, schedule, recorder):
     if getattr(method, "uses_selection", False) and protocol.candidate_selection == "loss":
         problem.selection_reference()
     denominator = problem.total
+    model_total = problem.model_parameters()
     validation_reference = problem.losses("validation") if protocol.selection_check else None
-    reporting_reference = problem.losses("reporting")
-    recorder.result.update(parameter_denominator=denominator,
+    reporting_reference, dense = problem.profile()
+
+    def model_removed(remaining):
+        return 100 * (denominator - remaining + problem.outside_removed()) / model_total
+
+    recorder.result.update(parameter_denominator=denominator, total_model_parameters=model_total,
                            selection=problem.split_metadata("validation") | {
-                               "enabled": protocol.selection_check, "rho": protocol.rho,
+                               "enabled": validation_reference is not None, "rho": protocol.rho,
                                "n_sigma": protocol.n_sigma},
                            heldout=problem.split_metadata("reporting") | {
                                "reference_loss": float(reporting_reference.mean())})
     row = {"step": 0, "target_sparsity": 0., "removed_percent": 0., "frac_removed": 0.,
-           "k_eff": problem.remaining(), "accepted": True, "admissible": True,
+           "model_removed_percent": model_removed(denominator), "k_eff": problem.remaining(), "accepted": True, "admissible": True,
            "heldout_loss": float(reporting_reference.mean()), "heldout_damage_percent": 0.,
            "test_loss": float(reporting_reference.mean()), "seconds": 0.}
     if validation_reference is not None:
@@ -96,7 +101,7 @@ def run_path(problem, method, protocol, schedule, recorder):
             row = {"step": index + 1, "target_sparsity": target,
                    "k_eff": remaining, "removed_percent": 100 * (denominator - remaining) / denominator,
                    "frac_removed": (denominator - remaining) / denominator,
-                   "accepted": not failed, "admissible": passed if validation is not None else None,
+                   "model_removed_percent": model_removed(remaining), "accepted": not failed, "admissible": passed if validation is not None else None,
                    "seconds": pruning_seconds,
                    "selection_seconds": selection_seconds, "heldout_seconds": heldout_seconds,
                    "total_seconds": time.perf_counter() - started,
@@ -136,4 +141,10 @@ def run_path(problem, method, protocol, schedule, recorder):
     if protocol.save_model:
         recorder.checkpoint(problem, accepted)
         recorder.result["model_artifact"] = "model.pt"
+    problem.compact()
+    if validation_reference is not None:
+        problem.losses("validation")
+    values, endpoint = problem.profile()
+    endpoint["compaction_loss_change"] = float(values.mean()) - accepted["heldout_loss"]
+    recorder.result["inference"] = {"dense": dense, "endpoint": endpoint}
     return recorder.finish(reason, accepted)

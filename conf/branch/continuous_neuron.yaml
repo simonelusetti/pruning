@@ -7,3 +7,4 @@ schedule:
 options:
   deletion_unit: hidden_neuron
   b_refresh: step
+label: continuous_neuron

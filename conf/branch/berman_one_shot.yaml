@@ -1,0 +1,12 @@
+defaults:
+- berman
+- _self_
+schedule:
+  mode: independent
+options:
+  scheme: one_shot
+  exclude: [W_pos]
+  avg_points: 3
+  probe_batch: 32
+  sample_chunk: 16
+label: berman_one_shot

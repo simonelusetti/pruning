@@ -3,10 +3,12 @@ import random
 from functools import lru_cache
 from pathlib import Path
 import torch
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, DownloadConfig, DownloadManager, concatenate_datasets, load_dataset
 from pruning.paths import BASELINE_CACHE
 DATASET_CACHE = BASELINE_CACHE / "datasets"
 EVALUATION_CACHE = BASELINE_CACHE / "evaluation"
+# The archive read by the hub bookcorpus script, which current datasets releases cannot execute.
+BOOKCORPUS_URL = "https://storage.googleapis.com/huggingface-nlp/datasets/bookcorpus/bookcorpus.tar.bz2"
 
 
 @lru_cache(maxsize=1)
@@ -25,6 +27,13 @@ def c4_training_data():
         return concatenate_datasets([Dataset.from_file(str(path)) for path in shards])
 
 
+@lru_cache(maxsize=1)
+def bookcorpus_training_data():
+    root = DownloadManager(download_config=DownloadConfig(cache_dir=str(DATASET_CACHE))).download_and_extract(BOOKCORPUS_URL)
+    files = sorted(str(path) for path in Path(root).rglob("*.txt"))
+    return load_dataset("text", data_files={"train": files}, split="train", cache_dir=str(DATASET_CACHE))
+
+
 def calibration_tokens(tokenizer, dataset: str, nsamples: int, seqlen: int,
                        seed: int) -> list[torch.Tensor]:
     if dataset == "wikitext2":
@@ -35,7 +44,7 @@ def calibration_tokens(tokenizer, dataset: str, nsamples: int, seqlen: int,
         return [encoded[:, (i := rng.randint(0, encoded.shape[1] - seqlen - 1)):i + seqlen]
                 for _ in range(nsamples)]
 
-    ds = c4_training_data()
+    ds = bookcorpus_training_data() if dataset == "bookcorpus" else c4_training_data()
     rng = random.Random(seed)
     samples = []
     byte_limit = (seqlen - tokenizer.num_special_tokens_to_add(pair=False)

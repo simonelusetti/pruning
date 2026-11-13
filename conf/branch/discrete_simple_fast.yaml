@@ -1,0 +1,10 @@
+defaults:
+- discrete_simple
+- _self_
+schedule:
+  spacing: 0.05
+options:
+  penalty_trials: 6
+  penalty_mode: retune
+  permanent_deletions: false
+label: discrete_simple_fast

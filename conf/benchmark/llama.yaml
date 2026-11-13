@@ -1,0 +1,11 @@
+defaults:
+- opt
+- _self_
+family: llama
+name: llama
+model: huggyllama/llama-7b
+paper_model: decapoda-research/llama-7b-hf
+dtype: float16
+max_layers: 32
+reporting_dataset: wikitext2_test
+evaluation_tokens: 0

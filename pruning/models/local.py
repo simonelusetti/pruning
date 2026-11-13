@@ -59,7 +59,7 @@ class LocalProblem:
         self.adapter, self.state = load_benchmark(cfg.benchmark.name, cfg.runtime.device)
         self.adapter.data = split_validation(self.adapter.data, cfg.benchmark.validation_split_seed)
         self.total = self.adapter.k_eff(self.state)
-        self.canonical_evaluation = cfg.branch.name == "berman"
+        self.canonical_evaluation = cfg.branch.name in {"berman", "reference"}
         self._selection_reference = None
 
     def evaluation_state(self):
@@ -71,6 +71,22 @@ class LocalProblem:
 
     def remaining(self):
         return self.adapter.k_eff(self.evaluation_state())
+
+    def model_parameters(self):
+        return self.total
+
+    def parameter_bytes(self):
+        return self.remaining() * next(iter(self.state.params.values())).element_size()
+
+    def outside_removed(self):
+        return 0
+
+    def compact(self):
+        pass
+
+    def profile(self):
+        from pruning.models.base import profile
+        return profile(self)
 
     def snapshot(self):
         return self.state.clone()

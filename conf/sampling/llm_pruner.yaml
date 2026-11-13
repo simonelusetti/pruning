@@ -1,0 +1,10 @@
+defaults:
+- default
+- _self_
+dataset: bookcorpus
+calibration_sequences: 10
+b_sequences: 10
+refresh: fixed
+selection_context: 128
+heldout_context: 128
+evaluation_batch_size: 1

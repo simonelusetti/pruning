@@ -1,5 +1,5 @@
 defaults:
-- discrete_simple
+- discrete_simple_accurate
 - _self_
 schedule:
   mode: greedy
@@ -10,3 +10,4 @@ options:
   permanent_deletions: true
   initial_sparsity: 0.05
   penalty_trials: 6
+label: discrete_simple_global

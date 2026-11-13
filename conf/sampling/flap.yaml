@@ -1,0 +1,8 @@
+defaults:
+- default
+- _self_
+dataset: wikitext2
+calibration_sequences: 1024
+b_sequences: 1024
+refresh: fixed
+evaluation_batch_size: 1

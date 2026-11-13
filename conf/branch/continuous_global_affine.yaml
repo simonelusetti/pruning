@@ -1,0 +1,12 @@
+defaults:
+- continuous_global
+- _self_
+options:
+  affine: true
+  canonicalization: true
+  fisher_n: ${oc.select:benchmark.fisher_n,null}
+  fisher_seed: ${sampling.seed}
+  fisher_batch: 1
+  likelihood: auto
+  variance: 1.0
+label: continuous_global_affine

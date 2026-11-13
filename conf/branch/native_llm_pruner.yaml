@@ -1,0 +1,10 @@
+name: native
+schedule:
+  mode: independent
+  targets: null
+  spacing: 0.05
+  maximum: ${protocol.max_removed}
+options:
+  program: llm_pruner
+  allow_version_mismatch: false
+label: native_llm_pruner

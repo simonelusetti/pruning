@@ -1,0 +1,7 @@
+defaults:
+- llama
+- override /sampling@_global_.sampling: flap
+- _self_
+name: llama_flap
+calibration_sequences: 1024
+seqlen: 128

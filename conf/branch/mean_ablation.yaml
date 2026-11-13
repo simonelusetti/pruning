@@ -1,0 +1,8 @@
+defaults:
+- reference
+- _self_
+schedule:
+  mode: greedy
+options:
+  score: mean_ablation
+label: mean_ablation

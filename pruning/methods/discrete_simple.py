@@ -7,13 +7,11 @@ import time
 import torch
 from torch import nn
 from pruning.nnprune.kronecker import KroneckerFisher
-from pruning.nnprune.l0 import lipschitz_estimate, minimize_l0
-from pruning.nnprune.network import linear_chains
+from pruning.nnprune.l0 import initial_curvature, minimize_l0
+from pruning.nnprune.l0_fast import lipschitz_estimate, minimize_l0 as minimize_fast
+from pruning.nnprune.network import linear_chains, parameter_name
 from pruning.nnprune.canonicalize.mlp import canonicalize_mlp_tensors
-
-
-def parameter_name(module, suffix):
-    return f"{module}.{suffix}" if module else suffix
+from pruning.nnprune.canonicalize.gated import canonicalize_gated
 
 
 class DiscreteSimple:
@@ -34,6 +32,11 @@ class DiscreteSimple:
             raise ValueError("Invalid matrix-free L0 settings")
         if options.get("penalty_mode", "retune") not in {"retune", "fixed"} or not 0 < options.get("initial_sparsity", .05) < 1:
             raise ValueError("Invalid L0 penalty mode or initial sparsity")
+        if options.get("proposal_fraction", 0.):
+            raise ValueError("Ranked L0 starts have been removed; use branch=discrete_simple_global")
+        self.solver = options.get("solver", "fast")
+        if self.solver not in {"fast", "accurate"}:
+            raise ValueError("L0 solver must be fast or accurate")
         if options.b_refresh == "frozen" and problem.cfg.sampling.refresh != "fixed":
             raise ValueError("Frozen factors require sampling.refresh=fixed")
         problem.model.eval()
@@ -46,11 +49,12 @@ class DiscreteSimple:
         owners = Counter(id(parameter) for module in problem.model.modules()
                          for parameter in module.parameters(recurse=False))
         self.modules, self.penalized, self.initial_nonzero = {}, {}, {}
+        state_device = problem.cfg.runtime.get("state_device", problem.device)
         masks = problem.extra.setdefault("pruned_coordinates", {})
         problem.extra["pruned_coordinate_convention"] = "live"
         for name, module in discover().items():
             penalized = torch.zeros((module.out_features, module.in_features + int(module.bias is not None)),
-                                    dtype=torch.bool, device=module.weight.device)
+                                    dtype=torch.bool, device=state_device)
             for suffix, parameter in module.named_parameters(recurse=False):
                 key = parameter_name(name, suffix)
                 selected = patterns is None or any(fnmatchcase(key, pattern) for pattern in patterns)
@@ -65,8 +69,8 @@ class DiscreteSimple:
             self.modules[name], self.penalized[name] = module, penalized
             for suffix, parameter in module.named_parameters(recurse=False):
                 key = parameter_name(name, suffix)
-                self.initial_nonzero[key] = parameter.detach().ne(0)
-                masks.setdefault(key, torch.ones_like(parameter, dtype=torch.bool))
+                self.initial_nonzero[key] = parameter.detach().ne(0).to(state_device)
+                masks.setdefault(key, torch.ones(parameter.shape, device=state_device, dtype=torch.bool))
         if not self.modules:
             raise ValueError("No affine parameters selected for the L0 penalty")
         self.chains, pairs, used = [], {}, set()
@@ -75,18 +79,29 @@ class DiscreteSimple:
             names = tuple(name.rpartition(".")[0] for name in chain.weights)
             if not set(names) <= self.modules.keys():
                 continue
-            if len(names) != 2 or used.intersection(names):
-                raise ValueError("Canonical L0 currently requires disjoint two-affine chains")
-            left, right = names
+            if used.intersection(names):
+                raise ValueError("Canonical L0 chains must not share affine modules")
             if not all(bool(self.penalized[name][:, :self.modules[name].in_features].all()) for name in names):
                 raise ValueError("Canonical L0 requires both complete weight matrices in each chain")
-            if self.modules[right].bias is not None:
-                # Constant folding may change this bias, so it cannot be promised as a deletion.
-                self.penalized[right][:, -1] = False
+            for right in names[1:]:
+                if self.modules[right].bias is not None:
+                    # Constant folding may change this bias, so it cannot be promised as a deletion.
+                    self.penalized[right][:, -1] = False
             self.chains.append(chain)
-            pairs[left] = (left, right, self.modules[left].in_features)
+            edges = tuple((left, right, self.modules[left].in_features) for left, right in zip(names, names[1:]))
+            pairs[names[0]] = (names, edges[0] if len(edges) == 1 else edges)
             used.update(names)
-        self.units = [(tuple(pair[:2]), pair) for pair in pairs.values()]
+        self.units = list(pairs.values())
+        self.gated_groups = list(problem.gated_groups()) if options.canonicalization and hasattr(problem, "gated_groups") else []
+        for group in self.gated_groups:
+            if not set(group.names) <= self.modules.keys():
+                raise ValueError("Canonical gated pruning requires gate, up, and down projections together")
+            if any(self.modules[name].bias is not None or not bool(self.penalized[name].all()) for name in group.names):
+                raise ValueError("Canonical gated L0 requires bias-free, fully penalized projections")
+            if used.intersection(group.names):
+                raise ValueError("Canonical groups must not share affine modules")
+            self.units.append((group.names, group))
+            used.update(group.names)
         self.units += [((name,), None) for name in self.modules if name not in used]
         if options.get("permanent_deletions", False):
             problem.extra.setdefault("l0_live", {name: torch.ones_like(mask) for name, mask in self.penalized.items()})
@@ -110,7 +125,11 @@ class DiscreteSimple:
                 sa, sb = scales
                 self.cached[name] = a / sa[:, None] / sa[None, :], b / sb[:, None] / sb[None, :]
                 self.scales[name] = sa, sb
-            self.lipschitz = {name: lipschitz_estimate(a, b) for name, (a, b) in self.cached.items()}
+            curvature = lipschitz_estimate if self.solver == "fast" else initial_curvature
+            self.curvatures = {name: curvature(a, b) for name, (a, b) in self.cached.items()}
+            self.inverses = ({name: tuple(torch.cholesky_inverse(torch.linalg.cholesky(factor)) for factor in (a, b))
+                              for name, (a, b) in self.cached.items()}
+                             if self.solver == "accurate" and options.refit_iterations else None)
         return self.cached
 
     @torch.no_grad()
@@ -138,15 +157,22 @@ class DiscreteSimple:
         for chain in self.chains:
             canonicalize_mlp_tensors([parameters[name] for name in chain.weights],
                                     [parameters[name] if name else None for name in chain.biases], chain.activations)
+        for group in self.gated_groups:
+            dead = canonicalize_gated(*(self.modules[name].weight for name in group.names))
+            if updated is not None:
+                updated[group.gate][dead] = False
+                updated[group.up][dead] = False
+                updated[group.down][:, dead] = False
         if updated is not None:
             for chain in self.chains:
-                left, right = (name.rpartition(".")[0] for name in chain.weights)
-                incoming, outgoing = self.modules[left], self.modules[right]
-                dead = incoming.weight.eq(0).all(1) & outgoing.weight.eq(0).all(0)
-                if incoming.bias is not None:
-                    dead &= incoming.bias.eq(0)
-                updated[left][dead] = False
-                updated[right][:, :incoming.out_features][:, dead] = False
+                names = [name.rpartition(".")[0] for name in chain.weights]
+                for left, right in zip(names, names[1:]):
+                    incoming, outgoing = self.modules[left], self.modules[right]
+                    dead = incoming.weight.eq(0).all(1) & outgoing.weight.eq(0).all(0)
+                    if incoming.bias is not None:
+                        dead &= incoming.bias.eq(0)
+                    updated[left][dead] = False
+                    updated[right][:, :incoming.out_features][:, dead] = False
             if commit:
                 problem.extra["l0_live"] = updated
         for name, module in self.modules.items():
@@ -179,7 +205,7 @@ class DiscreteSimple:
         if calibrate:
             if target is None:
                 raise ValueError("Specify a sparsity hint or an explicit L0 penalty")
-            scores = torch.cat([.5 * self.lipschitz[name] * value[self.penalized[name] & value.ne(0)].square()
+            scores = torch.cat([.5 * self.curvatures[name] * value[self.penalized[name] & value.ne(0)].square()
                                 for name, value in reference.items()])
             needed = math.ceil(target * problem.total) - (problem.total - problem.remaining())
             rank = max(1, min(len(scores), needed))
@@ -192,14 +218,18 @@ class DiscreteSimple:
         for trial in range(options.penalty_trials if calibrate else 1):
             values, history, completed = {}, [], 0
             for names, pair in self.units:
-                updated, record = minimize_l0(
+                solver = minimize_fast if self.solver == "fast" else minimize_l0
+                settings = ({"lipschitz": {name: self.curvatures[name] for name in names}}
+                            if self.solver == "fast" else
+                            {"inverses": {name: self.inverses[name] for name in names} if self.inverses else None})
+                updated, record = solver(
                     {name: reference[name] for name in names}, {name: factors[name] for name in names},
                     penalty, {name: self.penalized[name] for name in names}, options,
-                    lipschitz={name: self.lipschitz[name] for name in names}, pair=pair,
-                    fixed={name: fixed[name] for name in names} if fixed is not None else None)
+                    pair=pair, fixed={name: fixed[name] for name in names} if fixed is not None else None, **settings)
                 values.update(updated)
-                for name in names:
-                    self.lipschitz[name] = record["lipschitz"]
+                if self.solver == "fast":
+                    for name in names:
+                        self.curvatures[name] = record["lipschitz"]
                 history.append({"modules": list(names), **record})
                 completed += len(names)
                 progress(completed, history, 0, time.perf_counter() - started)
@@ -235,6 +265,7 @@ class DiscreteSimple:
                 "new_removed_percent": 100 * (remaining_before - problem.remaining()) / problem.total,
                 "penalty_fixed": fixed_penalty,
                 "factor_seconds": factor_seconds,
-                "iht_converged_before_refit_units": sum(row["iht_converged_before_refit"] for row in history),
+                "proximal_converged_units": sum(row.get("proximal_converged", row.get("iht_converged_before_refit", False))
+                                                for row in history),
                 "optimized_modules": len(self.modules), "canonical_chains": len(self.chains),
                 "metric": "axb", **cleanup}

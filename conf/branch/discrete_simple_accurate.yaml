@@ -1,0 +1,9 @@
+defaults:
+- discrete_simple
+- _self_
+options:
+  solver: accurate
+  refit_iterations: 2000
+  refit_rtol: 1.0e-06
+  solver_dtype: float64
+label: discrete_simple_accurate

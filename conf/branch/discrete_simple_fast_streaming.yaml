@@ -1,0 +1,6 @@
+defaults:
+- discrete_simple_fast
+- _self_
+options:
+  factor_backend: streaming
+label: discrete_simple_fast_streaming

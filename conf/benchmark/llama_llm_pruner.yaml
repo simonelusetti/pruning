@@ -1,0 +1,8 @@
+defaults:
+- llama
+- override /sampling@_global_.sampling: llm_pruner
+- _self_
+name: llama_llm_pruner
+calibration_sequences: 10
+seqlen: 64
+selection_dataset: wikitext2

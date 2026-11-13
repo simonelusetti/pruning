@@ -4,7 +4,7 @@ import math
 import time
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-from pruning.models.opt import linear_layers, forward_layer, capture_first_inputs, capture_first_inputs as capture_first_layer_inputs
+from pruning.models.opt import linear_layers, forward_layer, capture_first_inputs, capture_first_inputs as capture_first_layer_inputs, decoder_layers
 
 
 @dataclass
@@ -16,8 +16,8 @@ class ActivationStats:
 
 
 class SecondMoment:
-    def __init__(self, width, include_bias=False, device="cpu"):
-        self.matrix = torch.zeros((width, width), device=device)
+    def __init__(self, width, include_bias=False, device="cpu", dtype=None):
+        self.matrix = torch.zeros((width, width), device=device, dtype=dtype)
         self.count = 0
         self.include_bias = include_bias
 
@@ -32,15 +32,19 @@ class SecondMoment:
         return self.matrix / self.count
 
 
-def collect_a(layer, hidden, kwargs, names, batch_size=1, *, return_hidden=False):
+def collect_a(layer, hidden, kwargs, names, batch_size=1, *, return_hidden=False, include_bias=False, dtype=None):
     """Collect OPT input moments, sharing the identical Q/K/V factor."""
     modules = linear_layers(layer)
     owners, groups = {}, {}
     for name in names:
         prefix, _, projection = name.rpartition(".")
-        group = prefix if projection in {"q_proj", "k_proj", "v_proj"} else name
+        group = prefix if projection in {"q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"} else name
+        if include_bias:
+            group = group, modules[name].bias is not None
         owners[name] = groups.setdefault(group, name)
-    stats = {name: SecondMoment(modules[name].in_features, device=modules[name].weight.device)
+    stats = {name: SecondMoment(modules[name].in_features + int(include_bias and modules[name].bias is not None),
+                               include_bias=include_bias and modules[name].bias is not None,
+                               device=modules[name].weight.device, dtype=dtype)
              for name in dict.fromkeys(owners.values())}
     handles = [modules[name].register_forward_pre_hook(
         lambda _module, inputs, key=name: stats[key].add(inputs[0])) for name in stats]
@@ -59,7 +63,7 @@ def estimate_b_covariance(model, sequences, names, max_tokens, seed,
                           on_sequence=None, batch_size=1):
     """Accumulate model-score covariances without backpropagating before the first target."""
     modules = {(index, name): linear_layers(layer)[name]
-               for index, layer in enumerate(model.model.decoder.layers[:layers_count])
+               for index, layer in enumerate(decoder_layers(model)[:layers_count])
                for name in names if (layer_index is None or index == layer_index)
                and (layer_indices is None or index in layer_indices)}
     device = next(model.parameters()).device
@@ -94,7 +98,7 @@ def estimate_b_covariance(model, sequences, names, max_tokens, seed,
         return args, {**kwargs, "hidden_states": kwargs["hidden_states"].detach().requires_grad_(True)}
 
     first_layer = min(index for index, _ in modules)
-    handles.append(model.model.decoder.layers[first_layer].register_forward_pre_hook(
+    handles.append(decoder_layers(model)[first_layer].register_forward_pre_hook(
         start_gradient, with_kwargs=True))
     generator = torch.Generator(device=device).manual_seed(seed)
     batches = DataLoader(TensorDataset(torch.cat(sequences)), batch_size=batch_size)

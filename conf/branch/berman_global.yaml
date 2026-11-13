@@ -1,0 +1,10 @@
+defaults:
+- berman
+- _self_
+options:
+  scheme: global
+  exclude: [W_pos]
+  avg_points: 3
+  probe_batch: 32
+  sample_chunk: 16
+label: berman_global

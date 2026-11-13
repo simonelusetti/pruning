@@ -11,6 +11,10 @@ from torch.fx import symbolic_trace
 from .canonicalize.mlp import canonicalize_mlp_tensors
 
 
+def parameter_name(module, suffix):
+    return f"{module}.{suffix}" if module else suffix
+
+
 @dataclass
 class LinearChain:
     weights: tuple[str, ...]

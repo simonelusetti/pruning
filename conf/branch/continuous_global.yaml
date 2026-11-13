@@ -8,3 +8,4 @@ options:
   b_refresh: step
   modules: all
   accounting_modules: all
+label: continuous_global

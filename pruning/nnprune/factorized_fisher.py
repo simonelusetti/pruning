@@ -5,7 +5,8 @@ import torch
 
 @torch.no_grad()
 def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
-                      max_iterations=1000, progress=None, b_inverse=None):
+                      max_iterations=1000, progress=None, b_inverse=None,
+                      a_inverse=None, initial_update=None):
     """Minimize the AXB quadratic with fixed deletions and all survivors free."""
     if weight.ndim != 2 or deleted.shape != weight.shape or deleted.dtype != torch.bool:
         raise ValueError("weight and boolean deletion mask must have the same matrix shape")
@@ -22,14 +23,19 @@ def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
     fixed = torch.where(deleted, -weight, 0.)
     rhs = -(b @ fixed @ a).masked_fill(deleted, 0.)
     rhs_norm = torch.linalg.vector_norm(rhs)
-    update = torch.zeros_like(weight)
+    if initial_update is not None and initial_update.shape != weight.shape:
+        raise ValueError("initial compensation must have the weight matrix shape")
+    update = (torch.zeros_like(weight) if initial_update is None else
+              initial_update.to(weight).clone().masked_fill_(deleted, 0.))
     iterations = 0
-    residual = rhs.clone()
+    residual = (rhs.clone() if initial_update is None else
+                rhs - (b @ update @ a + mu * update).masked_fill(deleted, 0.))
     if float(rhs_norm) > 0:
         if progress is not None:
             progress(0, 1.)
         if mu == 0:
-            a_inverse = torch.cholesky_inverse(torch.linalg.cholesky(a))
+            a_inverse = (torch.cholesky_inverse(torch.linalg.cholesky(a)) if a_inverse is None else
+                         a_inverse.to(weight))
             if b_inverse is None:
                 b_inverse = torch.cholesky_inverse(torch.linalg.cholesky(b))
             else:
@@ -51,7 +57,10 @@ def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
         z = precondition(residual)
         direction = z.clone()
         rz = (residual * z).sum()
-        for iterations in range(1, max_iterations + 1):
+        for iteration in range(1, max_iterations + 1):
+            if float(torch.linalg.vector_norm(residual)) <= rtol * float(rhs_norm):
+                break
+            iterations = iteration
             product = (b @ direction @ a + mu * direction).masked_fill(deleted, 0.)
             curvature = (direction * product).sum()
             if not bool(torch.isfinite(curvature)) or float(curvature) <= 0:
@@ -79,6 +88,8 @@ def complement_update(weight, a, b, deleted, *, mu=0., rtol=1e-6,
             raise RuntimeError(
                 f"complement CG did not converge in {max_iterations} iterations; "
                 f"relative residual={float(torch.linalg.vector_norm(residual) / rhs_norm):g}")
+    else:
+        update.zero_()
     delta = fixed + update.masked_fill(deleted, 0.)
     damage = .5 * (delta * (b @ delta @ a)).sum()
     return delta, {

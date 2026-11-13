@@ -1,8 +1,9 @@
 defaults:
+- sampling: default
 - benchmark: moons
 - branch: classic
-- sampling: default
 - protocol: default
+- runtime: default
 - _self_
 forge:
   store: null
@@ -11,7 +12,3 @@ forge:
   - pruning
   - ${benchmark.name}
   - ${branch.name}
-runtime:
-  device: cpu
-  threads: 8
-  python: null

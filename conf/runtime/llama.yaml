@@ -1,0 +1,6 @@
+defaults:
+- default
+- _self_
+device: cuda:0
+state_device: cpu
+snapshot_device: cpu

@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from pruning.paths import ROOT
-from pruning.models.base import TorchProblem
+from pruning.models.base import TorchProblem, compact_chain
 from pruning.nnprune.canonicalize.mlp import canonicalize_linear_chain
 DATA = ROOT / "outputs/cache/native_baselines/berman/mnist"
 CHECKPOINT = ROOT / "outputs/checkpoints/berman/simplenn_mnist_official.pt"
@@ -98,6 +98,9 @@ class MnistProblem(TorchProblem):
 
     def losses(self, split):
         return losses(self.model, self.splits[split], self.device).double()
+
+    def compact(self):
+        compact_chain(self.model.net, (0, 2, 4))
 
     def split_metadata(self, split):
         return {"dataset": "MNIST", "split": split, "count": len(self.splits[split].dataset),

@@ -5,6 +5,7 @@ schedule:
   spacing: 0.10
   maximum: ${protocol.max_removed}
 options:
+  solver: fast
   metric: axb
   canonicalization: true
   modules: all
@@ -30,3 +31,4 @@ options:
   b_damping: 0.01
   b_refresh: step
   causal: ${oc.select:benchmark.causal,false}
+label: discrete_simple

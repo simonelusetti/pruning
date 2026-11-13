@@ -8,3 +8,4 @@ options:
   fisher_n: ${oc.select:benchmark.fisher_n,500}
   fisher_seed: ${oc.select:benchmark.fisher_seed,42}
   batch_size: 128
+label: berman

@@ -1,0 +1,15 @@
+name: reference
+calibration_refresh: fixed
+schedule:
+  mode: independent
+  targets: null
+  spacing: 0.05
+  maximum: ${protocol.max_removed}
+options:
+  score: magnitude
+  refresh: frozen
+  include_bias: false
+  fisher_n: ${oc.select:benchmark.fisher_n,null}
+  fisher_seed: ${oc.select:benchmark.fisher_seed,42}
+  batch_size: 32
+label: reference

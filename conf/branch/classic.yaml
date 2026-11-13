@@ -5,3 +5,4 @@ schedule:
   mode: greedy
 options:
   weights: false
+label: classic

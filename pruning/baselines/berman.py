@@ -9,8 +9,14 @@ class Berman:
 
     def __init__(self, options):
         self.cfg, self.data = options, None
+        self.scheme = options.get("scheme", "iterative")
+        self.cached_scores = None
+        if self.scheme not in {"one_shot", "iterative", "global", "exact", "magnitude", "fim"} or options.get("avg_points", 3) < 2:
+            raise ValueError("Invalid Berman scheme or path quadrature size")
 
     def propose(self, problem, target, index, progress):
+        if self.scheme != "iterative" or self.cfg.get("exclude"):
+            return self.path_variant(problem, target)
         if problem.cfg.benchmark.family == "mnist":
             return self.mnist(problem, target)
         if problem.cfg.benchmark.name == "modadd":
@@ -27,6 +33,85 @@ class Berman:
         count = max(0, round(target * problem.total) - zeroed)
         _prune_lowest(state, scores, names, count)
         return {"kind": "berman", "n_deleted": count}
+
+    def path_variant(self, problem, target):
+        from pruning.nnprune.fdist_baseline import AdapterModule, fisher_loader, _eligible, _prune_lowest
+        from pruning.nnprune.third_party.fdist_fim import calculate_fim_backprop, fisher_entries_forward
+        if hasattr(problem, "model"):
+            net, device = problem.model, problem.device
+            if self.data is None:
+                self.data = DataLoader(TensorDataset(*problem.fisher_data(self.cfg.fisher_n, self.cfg.fisher_seed)),
+                                       batch_size=self.cfg.batch_size)
+        else:
+            net = AdapterModule(problem.adapter, problem.state)
+            device = next(net.parameters()).device
+            if self.data is None:
+                self.data = fisher_loader(problem.adapter, self.cfg.fisher_n, self.cfg.fisher_seed, self.cfg.batch_size)
+        parameters = dict(net.named_parameters())
+        excluded = set(self.cfg.get("exclude", ()))
+        original = {name: value.detach().clone() for name, value in parameters.items()}
+        def diagonal():
+            flat = calculate_fim_backprop(net, self.data, device=str(device)).to(device)
+            output, offset = {}, 0
+            for name, value in parameters.items():
+                output[name] = flat[offset:offset+value.numel()].view_as(value)
+                offset += value.numel()
+            return output
+        if self.scheme in {"one_shot", "magnitude", "fim"} and self.cached_scores is not None:
+            scores = self.cached_scores
+        elif self.scheme == "magnitude":
+            scores = {name: value.abs() for name, value in original.items()}
+            self.cached_scores = scores
+        else:
+            points = self.cfg.get("avg_points", 3)
+            if self.scheme == "global":
+                roots = {name: torch.zeros_like(value) for name, value in original.items()}
+                try:
+                    for alpha in torch.linspace(1., 1./points, points).tolist():
+                        with torch.no_grad():
+                            for name, value in parameters.items():
+                                value.copy_(original[name] * alpha)
+                        for name, value in diagonal().items():
+                            roots[name] += value.clamp_min(0).sqrt() / points
+                finally:
+                    with torch.no_grad():
+                        for name, value in parameters.items():
+                            value.copy_(original[name])
+            else:
+                metric = diagonal()
+                if self.scheme == "exact":
+                    for name, value in original.items():
+                        if name in excluded:
+                            continue
+                        indices = value.flatten().ne(0).nonzero().flatten()
+                        total = metric[name].flatten()[indices].clone()
+                        for alpha in torch.linspace(1., 0., points).tolist()[1:]:
+                            total += fisher_entries_forward(net, self.data, name, indices,
+                                torch.full((len(indices),), alpha, device=device), device=str(device),
+                                probe_batch=self.cfg.get("probe_batch", 32), sample_chunk=self.cfg.get("sample_chunk", 16)).to(device)
+                        metric[name].flatten()[indices] = total / points
+                roots = {name: value.clamp_min(0).sqrt() for name, value in metric.items()}
+            scores = metric if self.scheme == "fim" else {name: roots[name] * value.abs() for name, value in original.items()}
+            if self.scheme in {"one_shot", "fim"}:
+                self.cached_scores = scores
+        if hasattr(problem, "model"):
+            weights = torch.cat([value.flatten() for value in original.values()])
+            score = torch.cat([scores[name].flatten() for name in original])
+            allowed = torch.cat([torch.full_like(value, name not in excluded, dtype=torch.bool).flatten() for name, value in original.items()])
+            count = max(0, round(target * problem.total) - (problem.initial_nonzero - int(weights.count_nonzero())))
+            selected = score.masked_fill(weights.eq(0) | ~allowed, torch.inf).topk(min(count, int((weights.ne(0) & allowed).sum())), largest=False).indices
+            count = len(selected)
+            weights[selected] = 0
+            offset = 0
+            with torch.no_grad():
+                for value in parameters.values():
+                    value.copy_(weights[offset:offset+value.numel()].view_as(value))
+                    offset += value.numel()
+        else:
+            names = _eligible(problem.adapter, problem.state, excluded)
+            zeroed = sum(int((~problem.state.masks[name]).sum()) for name in names)
+            count = _prune_lowest(problem.state, scores, names, max(0, round(target * problem.total) - zeroed))
+        return {"kind": f"berman_{self.scheme}", "n_deleted": count}
 
     def mnist(self, problem, target):
         from pruning.nnprune.third_party.fdist_fim import calculate_fim_backprop
