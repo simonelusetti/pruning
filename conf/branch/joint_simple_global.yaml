@@ -1,7 +1,7 @@
 defaults:
-- discrete_simple
+- joint_simple
 - _self_
-name: discrete_simple_global
+name: joint_simple_global
 schedule:
   mode: greedy
 options:

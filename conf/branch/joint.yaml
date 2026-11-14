@@ -1,7 +1,7 @@
 defaults:
 - /settings@_here_: default
 - _self_
-name: discrete
+name: joint
 curvature: fisher
 schedule:
   mode: greedy
@@ -11,11 +11,11 @@ options:
   mu: 0.0001
   pool: 8
   update_pool: ${branch.options.pool}
-  window: ${oc.select:benchmark.methods.discrete.window,1}
+  window: ${oc.select:benchmark.methods.joint.window,1}
   group_pool: 1
   max_group: 16
   parameters: null
-  require_deletion: ${oc.select:benchmark.methods.discrete.require_deletion,false}
+  require_deletion: ${oc.select:benchmark.methods.joint.require_deletion,false}
   time_limit: 60.0
   gap: 0.01
   bound: 10.0

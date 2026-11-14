@@ -9,12 +9,14 @@ A solve unit is one affine module, or a whole canonical group (MLP chain, gated 
 from __future__ import annotations
 
 import contextlib
+import copy
 import math
 import tempfile
 from pathlib import Path
 import torch
 from torch import nn
-from pruning.nnprune.kronecker import KFAC, RowsFisher, kronecker_factors
+from torch.utils.data import DataLoader, TensorDataset
+from pruning.nnprune.kronecker import KFAC, RowsFisher, example_kl, kronecker_factors
 from pruning.nnprune.fisher_metric import Fisher
 from pruning.nnprune.network import Network, linear_chains, parameter_name
 from pruning.nnprune.canonicalize.mlp import canonicalize_mlp_tensors
@@ -28,6 +30,10 @@ def validate(branch, *, curvatures, scopes=("local", "global"), units=("weight",
         raise ValueError(f"{branch.name} supports scope {scopes}, unit {units}, curvature {curvatures}")
     if branch.replay and (branch.scope != "local" or branch.curvature != "kfac"):
         raise ValueError("replay prunes block by block, so it needs scope=local and K-FAC curvature")
+    if branch.compensation not in {"full", "none"} or (branch.compensation == "none" and branch.name not in {"singular", "joint_submodular"}):
+        raise ValueError("compensation is full, or none with singular or joint_submodular")
+    if branch.objective not in {"kl", "spread"} or (branch.objective == "spread" and branch.curvature != "kfac"):
+        raise ValueError("objective is kl, or spread with K-FAC curvature")
     if branch.factor_backend not in {"memory", "streaming"} or (branch.factor_backend == "streaming" and branch.curvature != "kfac"):
         raise ValueError("factor_backend is memory, or streaming with K-FAC curvature")
 
@@ -63,6 +69,9 @@ class Coefficients:
         self.gated = [group for group in groups if set(group.names) <= self.modules.keys()]
         # Downstream biases absorb folded constants, so they are never deletion candidates.
         self.protected = {name for names, _ in self.chains for name in names[1:] if self.modules[name].bias is not None}
+        if branch.objective == "spread" and hasattr(problem, "b_sequences"):
+            raise ValueError("objective=spread currently needs a supervised benchmark")
+        self.dense = copy.deepcopy(model).eval() if branch.objective == "spread" else None
         self.account()
 
     def width(self, name):
@@ -174,16 +183,31 @@ class Coefficients:
         return max(0, math.ceil(target * self.size(names)) - self.removed(names))
 
     def factors(self, names, estimation):
+        """Damped K-FAC factors. With objective=spread, each example is weighted by how much more than average the
+        current model already distorts its prediction (exact KL from the dense model, standardized), which is the
+        reweighted-Fisher step for the bound mean_i KL_i + beta * std_i KL_i, beta = sqrt(2 log(1/eta) / n)."""
         problem, sampling = self.problem, self.problem.cfg.sampling
-        x, _ = problem.fisher_data(estimation.n, estimation.seed)
         language = hasattr(problem, "b_sequences")
+        x, _ = problem.fisher_data(estimation.n, estimation.seed)
+        weights = self.spread_weights(x, estimation) if self.dense is not None else None
         factors = kronecker_factors(
             problem.model, x, estimation, {name: self.modules[name] for name in names},
             b_inputs=torch.cat(problem.b_sequences).to(x.device) if language else None,
             max_b_tokens=(sampling.b_tokens or None) if language else None,
             a_batch_size=sampling.activation_batch_size if language else None,
-            b_batch_size=sampling.b_batch_size if language else None)
+            b_batch_size=sampling.b_batch_size if language else None, weights=weights)
         return {name: (a[:self.width(name), :self.width(name)], b) for name, (a, b) in factors.items()}
+
+    @torch.no_grad()
+    def spread_weights(self, x, estimation):
+        def outputs(model):
+            rows = [model(batch) for (batch,) in DataLoader(TensorDataset(x), batch_size=estimation.batch)]
+            return torch.cat([row.logits if hasattr(row, "logits") else row for row in rows]).double()
+        kl = example_kl(outputs(self.dense), outputs(self.problem.model), estimation)
+        spread = kl.std(unbiased=False)
+        z = (kl - kl.mean()) / spread if spread > 0 else torch.zeros_like(kl)
+        beta = math.sqrt(2 * math.log(1 / estimation.confidence) / len(kl))
+        return (1 + beta * z).clamp_min(0)
 
     def fisher(self, names, estimation, dtype):
         network = Network(self.problem, canonicalization=False)

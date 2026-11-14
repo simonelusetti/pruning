@@ -7,16 +7,26 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 def kronecker_factors(model, inputs, settings, modules, *, b_inputs=None, max_b_tokens=None,
-                      a_batch_size=None, b_batch_size=None):
-    """Damped affine K-FAC blocks (A over inputs with a bias column, B over sampled output scores)."""
-    statistics, handles, batch_shape, phase = {}, [], None, None
+                      a_batch_size=None, b_batch_size=None, weights=None):
+    """Damped affine K-FAC blocks (A over inputs with a bias column, B over sampled output scores).
+
+    Optional nonnegative per-example `weights` (one per input row, with B estimated on the same inputs) reweight
+    every example's contribution to both factors."""
+    statistics, handles, batch_shape, phase, scale = {}, [], None, None, None
+    if weights is not None and b_inputs is not None:
+        raise ValueError("example weights need A and B estimated on the same inputs")
     b_inputs = inputs if b_inputs is None else b_inputs
+    weights = torch.ones(len(inputs), device=inputs.device) if weights is None else weights
+
+    def weighted(values):
+        return values * scale.reshape(-1, *([1] * (values.ndim - 1))).to(values)
     for name, module in modules.items():
         width = module.in_features + int(module.bias is not None)
         statistics[name] = [module.weight.new_zeros((width, width), dtype=torch.float64),
                             module.weight.new_zeros((module.out_features,) * 2, dtype=torch.float64), 0, 0]
 
         def accumulate(gradient, key=name):
+            gradient = weighted(gradient)
             if settings.causal:
                 gradient = gradient.reshape(*batch_shape, -1)[:, :-1]
                 if max_b_tokens is not None:
@@ -32,7 +42,7 @@ def kronecker_factors(model, inputs, settings, modules, *, b_inputs=None, max_b_
 
         def capture(_module, args, output, key=name, bias=module.bias is not None):
             if phase == "a":
-                values = args[0].detach().reshape(-1, args[0].shape[-1]).double()
+                values = weighted(args[0].detach().double()).reshape(-1, args[0].shape[-1])
                 if bias:
                     values = torch.cat((values, values.new_ones((len(values), 1))), 1)
                 statistics[key][0].addmm_(values.T, values)
@@ -49,11 +59,11 @@ def kronecker_factors(model, inputs, settings, modules, *, b_inputs=None, max_b_
     try:
         phase = "a"
         with torch.no_grad():
-            for (x,) in DataLoader(TensorDataset(inputs), batch_size=a_batch_size or settings.batch):
+            for x, scale in DataLoader(TensorDataset(inputs, weights.sqrt()), batch_size=a_batch_size or settings.batch):
                 model(x)
         phase = "b"
         with torch.enable_grad():
-            for (x,) in DataLoader(TensorDataset(b_inputs), batch_size=b_batch_size or settings.batch):
+            for x, scale in DataLoader(TensorDataset(b_inputs, weights.sqrt()), batch_size=b_batch_size or settings.batch):
                 if max_b_tokens is not None and min(values[3] for values in statistics.values()) >= max_b_tokens:
                     break
                 x = x.detach().requires_grad_(x.is_floating_point())
@@ -92,6 +102,17 @@ def kronecker_factors(model, inputs, settings, modules, *, b_inputs=None, max_b_
             factor.diagonal().add_(damping * factor.diag().mean().clamp_min(torch.finfo(factor.dtype).eps))
         factors[name] = a, b
     return factors
+
+
+def example_kl(reference, output, settings):
+    """Per-example KL(p_reference || p_output) between two models' outputs under the configured likelihood."""
+    if settings.likelihood == "gaussian":
+        return .5 * (output - reference).square().reshape(len(output), -1).sum(1) / settings.variance
+    if output[:1].numel() == 1 or settings.likelihood == "bernoulli":
+        p, q = reference.sigmoid().clamp(1e-12, 1 - 1e-12), output.sigmoid().clamp(1e-12, 1 - 1e-12)
+        return (p * (p / q).log() + (1 - p) * ((1 - p) / (1 - q)).log()).reshape(len(output), -1).sum(1)
+    log_p, log_q = reference.log_softmax(-1), output.log_softmax(-1)
+    return (log_p.exp() * (log_p - log_q)).sum(-1).reshape(len(output), -1).sum(1)
 
 
 def inverse(matrix):

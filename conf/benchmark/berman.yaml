@@ -15,7 +15,7 @@ validation_b: 2500
 methods:
   classic:
     per_family: 4
-  discrete:
+  joint:
     window: 256
     require_deletion: true
 calibration_sequences: 128

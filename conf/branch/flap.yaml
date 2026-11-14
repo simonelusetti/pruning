@@ -1,6 +1,5 @@
 name: flap
 calibration_refresh: fixed
-calibration_dataset: wikitext2
 schedule:
   mode: independent
   targets: null

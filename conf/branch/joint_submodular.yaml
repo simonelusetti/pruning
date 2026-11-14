@@ -1,0 +1,8 @@
+defaults:
+- /settings@_here_: default
+- _self_
+name: joint_submodular
+options:
+  rounds: 4
+  cg_rtol: 1.0e-06
+  cg_max_iterations: 10000

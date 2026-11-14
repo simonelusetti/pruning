@@ -1,10 +1,12 @@
-# Shared by discrete, discrete_simple and continuous; the meanings are documented in pruning/methods/kfac.py.
+# Shared by joint, joint_simple and singular; the meanings are documented in pruning/methods/kfac.py.
 scope: global
 replay: false
 unit: both
 affine: true
 curvature: kfac
 factor_backend: memory
+objective: kl
+compensation: full
 estimation:
   n: ${oc.select:benchmark.fisher_n,null}
   seed: ${oc.select:benchmark.fisher_seed,42}
@@ -14,6 +16,7 @@ estimation:
   a_damping: 0.01
   b_damping: 0.01
   causal: ${oc.select:benchmark.causal,false}
+  confidence: 0.05
 schedule:
   mode: progressive
   targets: null

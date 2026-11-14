@@ -16,7 +16,7 @@ python3 -m pip install -r requirements.txt
 python3 -m pip install -e ../forge
 ```
 
-`discrete` additionally requires `gurobipy` and a working license. Two-moons and modular addition generate their data and reuse checkpoints in `outputs/checkpoints/`. OPT downloads `facebook/opt-125m` and C4 through Hugging Face. The historical Berman/MNIST comparison needs `outputs/checkpoints/berman/simplenn_mnist_official.pt` and the four MNIST gzip files in `outputs/cache/native_baselines/berman/mnist/`; these inputs are not bundled.
+`joint` additionally requires `gurobipy` and a working license. Two-moons and modular addition generate their data and reuse checkpoints in `outputs/checkpoints/`. OPT downloads `facebook/opt-125m` and C4 through Hugging Face. The historical Berman/MNIST comparison needs `outputs/checkpoints/berman/simplenn_mnist_official.pt` and the four MNIST gzip files in `outputs/cache/native_baselines/berman/mnist/`; these inputs are not bundled.
 
 CPU and CUDA use the same tensor algorithms. Select the device with `runtime.device=cpu` or `runtime.device=cuda:0`; CUDA requires a CUDA-enabled build of the pinned PyTorch version and a working NVIDIA driver. Tokenization, reporting, and some layer-replay buffers remain on CPU. Gurobi's combinatorial solve remains on CPU even when Fisher estimation uses CUDA.
 
@@ -24,19 +24,19 @@ CPU and CUDA use the same tensor algorithms. Select the device with `runtime.dev
 
 ```bash
 forge run
-forge run benchmark=moons branch=discrete runtime.device=cpu
-forge run benchmark=berman branch=continuous runtime.device=cpu
-forge run benchmark=berman branch=discrete_simple branch.scope=local branch.unit=weight
-forge run benchmark=berman branch=discrete branch.curvature=kfac
-forge run benchmark=opt branch=continuous sampling.calibration_sequences=32 sampling.b_sequences=32
-forge run benchmark=opt branch=discrete_simple branch.scope=local branch.replay=true
-forge run benchmark=opt branch=discrete_simple_global runtime.device=cuda:0
+forge run benchmark=moons branch=joint runtime.device=cpu
+forge run benchmark=berman branch=singular runtime.device=cpu
+forge run benchmark=berman branch=joint_simple branch.scope=local branch.unit=weight
+forge run benchmark=berman branch=joint branch.curvature=kfac
+forge run benchmark=opt branch=singular sampling.calibration_sequences=32 sampling.b_sequences=32
+forge run benchmark=opt branch=joint_simple branch.scope=local branch.replay=true
+forge run benchmark=opt branch=joint_simple_global runtime.device=cuda:0
 forge run benchmark=opt branch=sparsegpt
 forge run benchmark=opt branch=reference branch.options.score=wanda branch.scope=local
 forge run benchmark=modadd branch=classic runtime.device=cuda:0
 forge run benchmark=modadd_berman branch=berman
-forge run benchmark=network branch=discrete_simple benchmark.model.f=/path/model.pt benchmark.data.f=/path/data.pt
-forge run benchmark=llama_wanda branch=continuous branch.factor_backend=streaming runtime=llama
+forge run benchmark=network branch=joint_simple benchmark.model.f=/path/model.pt benchmark.data.f=/path/data.pt
+forge run benchmark=llama_wanda branch=singular branch.factor_backend=streaming runtime=llama
 forge run benchmark=opt_slicegpt branch=native_slicegpt runtime.device=cuda:0
 ```
 
@@ -58,22 +58,25 @@ Our curvature methods are one branch each; their variants are shared settings ([
 | `factor_backend` | `memory`, `streaming` | Streaming estimates K-FAC factors one decoder block at a time on the unchanged model and keeps factors and scores in `runtime.scratch`. |
 | `estimation.*` | | Fisher sample (`n`, `seed`, `batch`), likelihood, variance and A/B damping, shared by every method. |
 
-A solve unit is one affine module, or a whole canonical group (an MLP chain or gated LLaMA MLP) when neurons are candidates. Under K-FAC a global problem separates into per-unit problems linked by one shared price per deletion, so `global` differs from `local` only in how the budget is shared. Function-preserving cleanup (dead neurons, folded constants) runs after every step in every method, and accounting counts initially nonzero coefficients that are zero. Plot labels are built from these settings, e.g. `continuous · global · both · affine · kfac`.
+A solve unit is one affine module, or a whole canonical group (an MLP chain or gated LLaMA MLP) when neurons are candidates. Under K-FAC a global problem separates into per-unit problems linked by one shared price per deletion, so `global` differs from `local` only in how the budget is shared. Function-preserving cleanup (dead neurons, folded constants) runs after every step in every method, and accounting counts initially nonzero coefficients that are zero. Plot labels are built from these settings, e.g. `singular · global · both · affine · kfac`.
 
 | Branch | Curvature | Supported settings |
 | --- | --- | --- |
-| `continuous` | K-FAC | all scopes, units, affine, replay, backends |
-| `discrete_simple` | K-FAC (default) or exact Fisher | all scopes, units, affine; replay and streaming with K-FAC |
-| `discrete` | exact Fisher (default) or K-FAC | `scope=global`; all units and affine |
+| `singular` | K-FAC | all scopes, units, affine, replay, backends |
+| `joint_simple` | K-FAC (default) or exact Fisher | all scopes, units, affine; replay and streaming with K-FAC |
+| `joint` | exact Fisher (default) or K-FAC | `scope=global`; all units and affine |
+| `joint_submodular` | K-FAC | all scopes, units, affine; memory backend, no replay |
 
-- `continuous` ranks candidates by singleton K-FAC OBS cost per removed parameter: `0.5 w² / (B⁻¹ᵢᵢ A⁻¹ⱼⱼ)` for a weight, the cheaper of an incoming-row cut (`0.5 wᵢ A wᵢ' / B⁻¹ᵢᵢ`) or outgoing-column cut for a neuron. It selects the cheapest candidates up to the budget, then solves every surviving coefficient of each changed module in one converged, preconditioned CG (the full AXB complement). Deletions stay fixed. Selection ignores interactions between the chosen candidates; the compensation is exact under K-FAC.
-- `discrete_simple` approximately minimizes `0.5 (V-W)' F (V-W) + λ · retained(V)` by penalized proximal gradient ([L0Learn, section 2.4](sources/l0learn_fast_best_subset_selection_coordinate_descent.pdf)), where `retained` counts nonzeros after canonical cleanup. With neuron candidates, the proximal map of each canonical unit also compares zeroing a neuron's incoming weights (a folded constant) and its outgoing weights, charging an annihilated neuron nothing; `unit=neuron` keeps single coefficients and only makes neuron decisions. λ is searched geometrically toward each target, over all units at once (`global`) or per unit (`local`); zeros may regrow. `solver=fast` (default) uses a power-iteration step, float32 and one capped diagonal-preconditioned refit; `solver=accurate` adapts its step, retries before accepting stationarity, and requires its refits ([CHITA's identify-and-refine](sources/chita_neural_network_pruning_combinatorial_optimization.pdf)) to converge, so use it with `refit_iterations=2000 refit_rtol=1e-6 solver_dtype=float64`. `standardize=true` is the exact unit-diagonal change of variables.
-- `discrete` solves a Fisher MIQP with Gurobi over a small pool: `pool` blocks of `window` coefficients screened by `0.5 θ² F_ii`, plus `group_pool` outgoing neuron columns (`unit=neuron` uses only columns, `unit=weight` only blocks and no structural reward). `update_pool` coordinates chosen by Fisher correlation compensate. Gurobi's restricted pip licence covers these pools.
+- `singular` ranks candidates by singleton K-FAC OBS cost per removed parameter: `0.5 w² / (B⁻¹ᵢᵢ A⁻¹ⱼⱼ)` for a weight, the cheaper of an incoming-row cut (`0.5 wᵢ A wᵢ' / B⁻¹ᵢᵢ`) or outgoing-column cut for a neuron. It selects the cheapest candidates up to the budget, then solves every surviving coefficient of each changed module in one converged, preconditioned CG (the full AXB complement). Deletions stay fixed. Selection ignores interactions between the chosen candidates; the compensation is exact under K-FAC.
+- `joint_simple` approximately minimizes `0.5 (V-W)' F (V-W) + λ · retained(V)` by penalized proximal gradient ([L0Learn, section 2.4](sources/l0learn_fast_best_subset_selection_coordinate_descent.pdf)), where `retained` counts nonzeros after canonical cleanup. With neuron candidates, the proximal map of each canonical unit also compares zeroing a neuron's incoming weights (a folded constant) and its outgoing weights, charging an annihilated neuron nothing; `unit=neuron` keeps single coefficients and only makes neuron decisions. λ is searched geometrically toward each target, over all units at once (`global`) or per unit (`local`); zeros may regrow. `solver=fast` (default) uses a power-iteration step, float32 and one capped diagonal-preconditioned refit; `solver=accurate` adapts its step, retries before accepting stationarity, and requires its refits ([CHITA's identify-and-refine](sources/chita_neural_network_pruning_combinatorial_optimization.pdf)) to converge, so use it with `refit_iterations=2000 refit_rtol=1e-6 solver_dtype=float64`. `standardize=true` is the exact unit-diagonal change of variables.
+- `joint` solves a Fisher MIQP with Gurobi over a small pool: `pool` blocks of `window` coefficients screened by `0.5 θ² F_ii`, plus `group_pool` outgoing neuron columns (`unit=neuron` uses only columns, `unit=weight` only blocks and no structural reward). `update_pool` coordinates chosen by Fisher correlation compensate. Gurobi's restricted pip licence covers these pools.
+
+- `joint_submodular` is a greedy cover over every deletable weight plus each neuron's two cleanup copies: a fan-in cut (the neuron becomes a constant folded downstream) and a fan-out cut. A candidate's reward is the parameters it newly covers, so the savings K are a coverage function, exact for neuron-level cleanup; its cost is the K-FAC damage. Each step runs `options.rounds` rounds; a round takes the lowest damage per newly covered parameter, neuron cuts one at a time with their exact rank-one compensation (Schur-complement updates of the restricted factor inverses) and weights in the order scored at the start of the round, then gives every changed module a converged AXB solve. One round is close to `singular · both`; more rounds re-score more often.
 
 Three branches keep their own behaviour:
 
 - `classic` is our neural extension of the supervisor's boundary-pruning framework (`classic_weights` adds scalar zeroing).
-- `discrete_simple_global` calibrates one global λ near `initial_sparsity` on its first greedy move, then keeps it fixed with permanent deletions until no coefficient leaves.
+- `joint_simple_global` calibrates one global λ near `initial_sparsity` on its first greedy move, then keeps it fixed with permanent deletions until no coefficient leaves.
 - Baselines: Berman's six schemes, our re-implementations of SparseGPT, Wanda and FLAP, the authors' own programs (`native_*`), and `reference`, an uncompensated ranking control with `options.score` magnitude, wanda (`|W|·‖x‖`) or random and its own `scope`. See [baseline definitions and setup](pruning/baselines/README.md).
 
 For another trained model, `benchmark=network` loads a saved `nn.Module` and a tensor dictionary containing `train`, `val`, and `test` pairs `(inputs, targets)`. The validation pair is split into candidate and stopping windows. Model forward returns logits as a tensor or an object with `.logits`. Canonical chains are inferred from the execution graph (exclusive linear/pointwise-activation chains with valid constant folding). `estimation.likelihood` defaults to Bernoulli for one output and categorical otherwise; set `gaussian` with `variance` for regression.
@@ -93,11 +96,11 @@ For another trained model, `benchmark=network` loads a saved `nn.Module` and a t
 
 For OPT, `branch.options.modules` restricts the linear modules being pruned. Optional `branch.options.accounting_modules` selects the percentage denominator and must include those modules; it defaults to the pruning scope. For example, `modules="fc1,fc2"` with `accounting_modules=all` prunes only MLPs but measures removal against all transformer-block linear parameters.
 
-For example, tune continuous sampling without editing code:
+For example, tune singular sampling without editing code:
 
 ```bash
-forge run benchmark=opt branch=continuous sampling.calibration_sequences=16 sampling.b_sequences=16 sampling.heldout_sequences=32
-forge run benchmark=opt branch=continuous branch.schedule.targets='[0.05,0.10,0.15]' protocol.save_model=true
+forge run benchmark=opt branch=singular sampling.calibration_sequences=16 sampling.b_sequences=16 sampling.heldout_sequences=32
+forge run benchmark=opt branch=singular branch.schedule.targets='[0.05,0.10,0.15]' protocol.save_model=true
 ```
 
 Language-model sampling controls:
@@ -155,7 +158,7 @@ After stopping, the engine drops fully dead units from that accepted state (an M
 [`pruning/plots.py`](pruning/plots.py) draws one four-panel figure per benchmark from the latest completed run of each method, where each method label (branch plus settings) is its own method: held-out loss increase against the removed share of the method's considered parameters and of all unique model parameters (shared weights counted once), then inference time and parameter memory at the last accepted state as a percentage of the same run's dense measurement. Only saved `result.json` curves are drawn; runs without inference measurements are left out of the bar panels. First rejected steps are marked with ×. Concurrent hooks serialize plot updates and replace images atomically.
 
 ```bash
-forge grid benchmark=moons --run branch=classic --run branch=classic_weights --run branch=discrete
+forge grid benchmark=moons --run branch=classic --run branch=classic_weights --run branch=joint
 forge metrics benchmark.name=moons
 forge artifact 'result.json'
 python3 -m pruning.plot_results opt

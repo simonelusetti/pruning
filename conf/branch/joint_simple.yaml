@@ -1,7 +1,7 @@
 defaults:
 - /settings@_here_: default
 - _self_
-name: discrete_simple
+name: joint_simple
 options:
   solver: fast
   parameters: null

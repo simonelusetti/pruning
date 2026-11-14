@@ -1,4 +1,4 @@
-"""Continuous: rank deletions by K-FAC OBS costs, then give every surviving coefficient its full AXB update."""
+"""Singular: rank deletions by K-FAC OBS costs, then give every surviving coefficient its full AXB update."""
 from __future__ import annotations
 
 import time
@@ -8,7 +8,7 @@ from pruning.nnprune.kronecker import damage, masked_cg
 from pruning.nnprune.streaming import Store, kth
 
 
-class Continuous:
+class Singular:
     uses_selection = False
 
     def __init__(self, problem, branch):
@@ -71,6 +71,11 @@ class Continuous:
             if not mask.any():
                 continue
             reference = {name: co.value(name)}
+            if self.branch.compensation == "none":
+                values[name] = reference[name].masked_fill(mask, 0.)
+                history.append({"module": name, "deleted": int(mask.sum()),
+                                "predicted_fisher_damage": damage(metric, reference, {name: values[name]})})
+                continue
             values.update(masked_cg(metric, reference, {name: reference[name].masked_fill(mask, 0.)},
                                     {name: co.live(name) & ~mask}, rtol=self.options.cg_rtol,
                                     iterations=self.options.cg_max_iterations, strict=True)[0])

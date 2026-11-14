@@ -46,6 +46,7 @@ def run_path(problem, method, protocol, schedule, recorder):
     row = {"step": 0, "target_sparsity": 0., "removed_percent": 0., "frac_removed": 0.,
            "model_removed_percent": model_removed(denominator), "k_eff": problem.remaining(), "accepted": True, "admissible": True,
            "heldout_loss": float(reporting_reference.mean()), "heldout_damage_percent": 0.,
+           "heldout_variance": float(reporting_reference.var()),
            "test_loss": float(reporting_reference.mean()), "seconds": 0.}
     if validation_reference is not None:
         row.update(selection_loss=float(validation_reference.mean()), loss_damage_percent=0.,
@@ -99,7 +100,8 @@ def run_path(problem, method, protocol, schedule, recorder):
                    **{key: value for key, value in details.items() if key not in {"layers"}}}
             if reporting is not None:
                 row.update(heldout_loss=reporting["loss"], heldout_damage_percent=reporting["damage_percent"],
-                           heldout_delta=reporting["delta"], heldout_se=reporting["se"], test_loss=reporting["loss"])
+                           heldout_delta=reporting["delta"], heldout_se=reporting["se"], test_loss=reporting["loss"],
+                           heldout_variance=reporting["variance"])
             if validation is not None:
                 row.update(selection_loss=validation["loss"], loss_damage_percent=validation["damage_percent"],
                            selection_delta=validation["delta"], selection_se=validation["se"],

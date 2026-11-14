@@ -13,7 +13,7 @@ def paired(values, reference):
 
 def loss_change(values, reference):
     mean, se = paired(values, reference)
-    return {"loss": float(values.mean()), "delta": mean, "se": se,
+    return {"loss": float(values.mean()), "delta": mean, "se": se, "variance": float(values.var()),
             "damage_percent": 100 * (float(values.mean() / reference.mean()) - 1)}
 
 

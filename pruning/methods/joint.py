@@ -123,7 +123,7 @@ def solve(network, fisher, options, allowed, deletable, pool, group_pool, max_gr
     updates = correlations.topk(count).indices
     q = fisher.quadratic(blocks, updates)
     scale = max(float(q.diag().max()), options.mu, options.lambda_u, options.lambda_d, 1e-12)
-    solver = gp.Model("discrete")
+    solver = gp.Model("joint")
     solver._logic_cache = {}
     solver.Params.OutputFlag = int(options.log)
     solver.Params.TimeLimit, solver.Params.MIPGap, solver.Params.NonConvex = options.time_limit, options.gap, 0
@@ -179,7 +179,7 @@ def solve(network, fisher, options, allowed, deletable, pool, group_pool, max_gr
     if round(savings.getValue()) != actual_savings or not math.isclose(direct, solver.ObjVal * scale, abs_tol=1e-7, rel_tol=1e-7):
         solver.dispose()
         raise RuntimeError("MIQP objective or canonical savings disagrees with applied move")
-    record = {"kind": "discrete", "n_deleted": len(deleted), "n_updates": int(changed.sum()),
+    record = {"kind": "joint", "n_deleted": len(deleted), "n_updates": int(changed.sum()),
               "closure_savings": actual_savings, "fisher_cost": damage,
               "fisher_cost_per_removed": damage / actual_savings, "search_objective": direct,
               "solver_objective": solver.ObjVal * scale, "solver_gap": solver.MIPGap,
@@ -193,7 +193,7 @@ def solve(network, fisher, options, allowed, deletable, pool, group_pool, max_gr
     return deleted, updates[changed], values[changed], record
 
 
-class Discrete:
+class Joint:
     uses_selection = False
 
     def __init__(self, problem, branch):
@@ -203,7 +203,7 @@ class Discrete:
         if (min(options.lambda_u, options.lambda_d, options.mu) < 0 or min(options.window, options.max_group) < 1 or
                 min(options.pool, options.group_pool, options.update_pool) < 0 or options.time_limit <= 0 or
                 not 0 <= options.gap < 1 or options.bound <= 0):
-            raise ValueError("invalid discrete optimizer settings")
+            raise ValueError("invalid joint optimizer settings")
         if branch.curvature == "kfac" and not hasattr(problem, "model"):
             raise ValueError("K-FAC curvature needs a PyTorch model")
         network = Network(problem, canonicalization=True)

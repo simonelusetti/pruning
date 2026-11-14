@@ -1,4 +1,4 @@
-"""Discrete simple: matrix-free canonical L0 on the curvature quadratic, with an L0 penalty tuned toward each target."""
+"""Joint simple: matrix-free canonical L0 on the curvature quadratic, with an L0 penalty tuned toward each target."""
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
@@ -12,7 +12,7 @@ from pruning.nnprune.network import parameter_name
 from pruning.nnprune.streaming import Store, kth
 
 
-class DiscreteSimple:
+class JointSimple:
     uses_selection = False
 
     def __init__(self, problem, branch):
@@ -20,8 +20,8 @@ class DiscreteSimple:
         options = branch.options
         if options.solver not in {"fast", "accurate"} or options.penalty_trials < 1 or options.penalty_growth <= 1:
             raise ValueError("Invalid L0 solver settings")
-        # discrete_simple_global keeps one penalty and permanent deletions over an untargeted greedy path.
-        self.fixed = branch.name == "discrete_simple_global"
+        # joint_simple_global keeps one penalty and permanent deletions over an untargeted greedy path.
+        self.fixed = branch.name == "joint_simple_global"
         self.branch, self.options, self.accurate = branch, options, options.solver == "accurate"
         self.dtype = getattr(torch, options.solver_dtype)
         self.co = Coefficients(problem, branch, permanent=self.fixed)

@@ -6,9 +6,9 @@ from omegaconf import OmegaConf
 from pruning.engine import run_path, targets
 from pruning.results import Recorder
 
-OURS = {"discrete", "discrete_simple", "discrete_simple_global", "continuous"}
-SUPPORTED = {"local": {"classic", "berman", "sparsegpt", "discrete", "reference"},
-             "mnist": {"classic", "discrete", "berman", "reference"} | OURS,
+OURS = {"joint", "joint_simple", "joint_simple_global", "joint_submodular", "singular"}
+SUPPORTED = {"local": {"classic", "berman", "sparsegpt", "joint", "reference"},
+             "mnist": {"classic", "joint", "berman", "reference"} | OURS,
              "network": {"reference"} | OURS,
              "opt": {"classic", "sparsegpt", "wanda", "flap", "reference", "native"} | OURS,
              "llama": {"reference", "native"} | OURS}
@@ -18,7 +18,12 @@ def label(branch):
     """Method name in plots: our methods and the reference controls are named by their settings."""
     if branch.name in OURS:
         parts = [branch.name, branch.scope, branch.unit, "affine" if branch.affine else "linear", branch.curvature]
-        return " · ".join(parts + (["replay"] if branch.replay else []))
+        parts += ["replay"] if branch.replay else []
+        parts += [branch.objective] if branch.objective != "kl" else []
+        parts += ["uncompensated"] if branch.compensation == "none" else []
+        if branch.name == "joint" and (branch.options.update_pool != branch.options.pool or branch.options.lambda_u == 0):
+            parts += [f"{branch.options.update_pool} updates" + (" free" if branch.options.lambda_u == 0 else "")]
+        return " · ".join(parts)
     if branch.name == "reference":
         return f"reference · {branch.options.score} · {branch.scope}"
     return branch.get("label", branch.name)
@@ -48,9 +53,9 @@ def validate(cfg):
     if min(s.evaluation_batch_size, s.b_batch_size, s.activation_batch_size) < 1:
         raise ValueError("evaluation, activation, and B batch sizes must be positive")
     schedule = cfg.branch.schedule
-    greedy = {"classic", "discrete", "discrete_simple_global"}
+    greedy = {"classic", "joint", "joint_simple_global"}
     if schedule.mode not in {"greedy", "progressive", "independent"} or (schedule.mode == "greedy") != (method in greedy):
-        raise ValueError("classic, discrete and discrete_simple_global are greedy; every other method follows targets")
+        raise ValueError("classic, joint and joint_simple_global are greedy; every other method follows targets")
     if method == "berman" and cfg.branch.options.get("scheme", "iterative") in {"one_shot", "magnitude", "fim"} and schedule.mode != "independent":
         raise ValueError("Berman's static schemes require an independent schedule")
     if method == "reference" and cfg.branch.options.refresh == "step" and schedule.mode != "progressive":
@@ -79,15 +84,18 @@ def problem_for(cfg, options):
 def method_for(cfg, problem, options):
     name, family = cfg.branch.name, cfg.benchmark.family
     branch = OmegaConf.merge(OmegaConf.to_container(cfg.branch, resolve=True), {"options": options})
-    if name in {"discrete_simple", "discrete_simple_global"}:
-        from pruning.methods.discrete_simple import DiscreteSimple
-        return DiscreteSimple(problem, branch)
-    if name == "continuous":
-        from pruning.methods.continuous import Continuous
-        return Continuous(problem, branch)
-    if name == "discrete":
-        from pruning.methods.discrete import Discrete
-        return Discrete(problem, branch)
+    if name in {"joint_simple", "joint_simple_global"}:
+        from pruning.methods.joint_simple import JointSimple
+        return JointSimple(problem, branch)
+    if name == "joint_submodular":
+        from pruning.methods.joint_submodular import JointSubmodular
+        return JointSubmodular(problem, branch)
+    if name == "singular":
+        from pruning.methods.singular import Singular
+        return Singular(problem, branch)
+    if name == "joint":
+        from pruning.methods.joint import Joint
+        return Joint(problem, branch)
     if name == "reference":
         from pruning.baselines.reference import ReferenceBaseline
         return ReferenceBaseline(problem, branch)
