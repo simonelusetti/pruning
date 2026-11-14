@@ -95,24 +95,14 @@ theory behind it. Three axes that used to be conflated under "joint": (1) whethe
 5. **Incremental updates under K-FAC.** Removing a row (or column) of module m is a Schur-complement update of the
    restricted $B^{-1}$ (or $A^{-1}$), O(d²), exact; scattered single weights break the Kronecker structure (no closed
    form) and must be batched with a CG solve between batches.
-6. **A convex alternative was considered and set aside.** The submodular surrogate
-   $F(S)=\alpha|S|+\beta\sum_g \mathrm{size}_g[S\cap g\ne\varnothing]$ has a convex envelope ($\ell_1$ + size-weighted
-   group $\ell_\infty$, via Bach's Lovász-extension result) but cannot express the OR death rule; it remains an option for
-   a convex, very scalable relaxation.
-7. **Label-based objectives fail in the quadratic framework.** Adding the true-label held-out gradient (a linear term)
-   makes the optimum a free Newton step on held-out data; along nearly flat Fisher directions it is enormous (≈250× the
-   weight norm in MNIST layer 1). A confidence-bound penalty does not help because the held-out gradient is genuinely
-   significant; the failure is quadratic-model validity. Damping fixes it only with ~100–1000× the damping that
-   compensation needs (the RHS has components in weak directions). Needs a trust region (e.g. Levenberg–Marquardt ratio
-   test) or abandoning labels in the objective.
-8. **The spread objective (implemented).** Use the per-example KL from the dense model for both terms (no labels, no
+6. **The spread objective (implemented).** Use the per-example KL from the dense model for both terms (no labels, no
    linear terms):
    $$\min_{\delta:\ \delta_D=-w_D}\ \mathbb{E}_i[\mathrm{KL}_i]+\beta\sqrt{\mathrm{Var}_i[\mathrm{KL}_i]},\qquad \beta=\sqrt{2\log(1/\eta)/n}.$$
    To leading order $\mathrm{Var}_i[\mathrm{KL}_i]=\tfrac14\mathrm{Var}_i[\delta^\top F_i\delta]$ (quartic; spread of squared
    prediction distortion $\|J_i\delta\|^2_{H_i}$). Its gradient is a reweighted Fisher, so it is optimised by IRLS:
    $F_w=\mathbb{E}_i[(1+\beta z_i)F_i]$ with $z_i$ the standardised exact per-example KL of the current model. The user
    preferred this bound form over mean + λ·variance because the bound's coefficient is dimensionless and fixed by n, η.
-9. **Compensation is a dial between generalisation and robustness** (empirical, berman). Uncompensated deletion acts
+7. **Compensation is a dial between generalisation and robustness** (empirical, berman). Uncompensated deletion acts
    as shrinkage on an overfit model: held-out loss drops ~5% below dense around 40–46% removed, then collapses (~45–58%).
    Full compensation reproduces the (overfit) dense model, so no dip, but survives to ~80%. The MIQP's dip came from its
    tiny update budget, not Gurobi: 0 / 8 / 64 updates give progressively shallower dips and later breaks; charging updates
@@ -140,13 +130,10 @@ Combinatorial / second-order pruning:
   features. [A] Bertsimas & Van Parys (Ann. Stat. 2020): exact sparse regression via cutting planes at 10⁵ scale.
 - [S] L0Learn (Hazimeh & Mazumder): penalised proximal gradient for L0 (basis of `joint_simple`).
 - [A] Louizos et al. (ICLR 2018): hard-concrete L0 gates, also group gates.
-- [A] QUBO pruning (2024–2026) and QPBO/roof duality (Rother et al., CVPR 2007).
 
 Set functions:
 - [A] El Halabi, Srinivas & Lacoste-Julien (NeurIPS 2022): neuron selection with compensation is weakly submodular;
   greedy with guarantees.
-- [A] Bach (NIPS 2010) and monograph; [A] Jenatton et al. (JMLR 2011): submodular → structured norms via the Lovász
-  extension; exact prox for tree-structured groups.
 - [A] Iyer & Bilmes (UAI 2012): difference of submodular functions (MM algorithms); [A] Iyer & Bilmes (NeurIPS 2013):
   submodular cover / submodular knapsack constraints (iterate modular bounds) — closest to our constrained form.
 - [A] Das & Kempe (ICML 2011) submodularity ratio; [A] Elenberg et al. (2016) RSC ⇒ weak submodularity.
@@ -190,7 +177,6 @@ The supervisor's three manuscripts ([S], in `sources/`):
 
 - Guarantees for greedy cover with exact lifted K plus compensated damage (coverage reward, weakly submodular cost,
   constrained/cover form); role of the multi-level cascade gap.
-- Trust-region treatment that would make held-out information usable in the quadratic framework.
 - A principled partial-compensation axis (the generalisation/robustness dial) and choosing the operating point by
   validation rather than at the break point.
 - Whether a K-free, information/variance-based structural reward (Information Dropout bridge) matches K(D) on the
