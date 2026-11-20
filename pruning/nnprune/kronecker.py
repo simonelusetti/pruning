@@ -42,9 +42,10 @@ def kronecker_factors(model, inputs, settings, modules, *, b_inputs=None, max_b_
 
         def capture(_module, args, output, key=name, bias=module.bias is not None):
             if phase == "a":
-                values = weighted(args[0].detach().double()).reshape(-1, args[0].shape[-1])
+                values = args[0].detach().double()
                 if bias:
-                    values = torch.cat((values, values.new_ones((len(values), 1))), 1)
+                    values = torch.cat((values, values.new_ones((*values.shape[:-1], 1))), -1)
+                values = weighted(values).reshape(-1, values.shape[-1])
                 statistics[key][0].addmm_(values.T, values)
                 statistics[key][2] += len(values)
             else:

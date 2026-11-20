@@ -21,6 +21,7 @@ def label(branch):
         parts += ["replay"] if branch.replay else []
         parts += [branch.objective] if branch.objective != "kl" else []
         parts += ["uncompensated"] if branch.compensation == "none" else []
+        parts += ["labels"] if branch.target == "labels" else []
         if branch.name == "joint" and (branch.options.update_pool != branch.options.pool or branch.options.lambda_u == 0):
             parts += [f"{branch.options.update_pool} updates" + (" free" if branch.options.lambda_u == 0 else "")]
         return " · ".join(parts)

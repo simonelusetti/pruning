@@ -53,12 +53,14 @@ def amount(value, unit):
 
 # One validated categorical hue per branch, fixed across benchmarks. The assignment maximises the smallest colour
 # difference between branches that share a benchmark; branches that never meet (singular and classic, joint
-# and SliceGPT, SparseGPT and LLM-Pruner) may share a hue.
-FAMILIES = {"singular": "#e87ba4", "joint_simple": "#6250d6", "joint": "#008300", "classic": "#e34948",
+# and SliceGPT, SparseGPT and LLM-Pruner, joint_submodular and classic) may share a hue.
+FAMILIES = {"singular": "#e87ba4", "joint_simple": "#6250d6", "joint_submodular": "#e34948", "joint": "#008300",
+            "classic": "#e34948",
             "sparsegpt": "#2a78d6", "wanda": "#eb6834", "flap": "#1baf7a", "berman": "#eda100",
             "slicegpt": "#008300", "llm_pruner": "#2a78d6", "reference": "#898781"}
-OURS = ("singular", "joint_simple", "joint", "classic")
+OURS = ("singular", "joint_simple", "joint_submodular", "joint", "classic")
 DEFAULTS = {"singular": "global · both · affine · kfac", "joint_simple": "global · both · affine · kfac",
+            "joint_submodular": "global · both · affine · kfac",
             "joint": "global · both · affine · fisher"}
 
 

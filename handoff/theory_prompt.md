@@ -83,8 +83,9 @@ theory behind it. Three axes that used to be conflated under "joint": (1) whethe
    copy its row, column and own bias). Savings are then a **coverage function** $K(T)=|\bigcup_{v\in T}\mathrm{cover}(v)|$,
    which is submodular, and still exact: the increasing returns were an artifact of describing structures only through
    their weights. Both cuts cover the same coordinates; they differ only in compensation (the fan-in cut alters the
-   protected downstream bias). Gap: multi-level cascades in chains of ≥ 3 layers (exact for 2-layer MLP blocks, e.g.
-   every OPT/LLaMA MLP).
+   protected downstream bias). After a cut, the rest of the neuron is frozen (it neither compensates nor is refit; cleanup
+   removes it), in every method. Gap: multi-level cascades in chains of ≥ 3 layers. Exact for 2-layer MLP blocks (every
+   OPT/LLaMA MLP); NOT exact on the berman MNIST model (784-64-64-10 is a 3-layer chain).
 3. **Use the constrained form.** K counts parameters and damage is in nats, so $K-\mathrm{damage}$ fixes an arbitrary
    exchange rate. Prefer $\min\ \mathrm{damage}\ \text{s.t.}\ K\ge k$ (progressive targets) or
    $\max K\ \text{s.t.}\ \mathrm{damage}\le\rho$; λ becomes a Lagrange multiplier. Iyer & Bilmes also show the
@@ -107,7 +108,8 @@ theory behind it. Three axes that used to be conflated under "joint": (1) whethe
    Full compensation reproduces the (overfit) dense model, so no dip, but survives to ~80%. The MIQP's dip came from its
    tiny update budget, not Gurobi: 0 / 8 / 64 updates give progressively shallower dips and later breaks; charging updates
    (λ_u) is irrelevant. On OPT-125M no method dips (the pretrained model is not overfit to its evaluation data). Using the
-   OBS score without compensation is mis-specified (should use OBD).
+   OBS score without compensation is mis-specified; uncompensated variants now rank by the OBD cost (the earlier
+   uncompensated curves used OBS and are being rerun).
 
 ## Related work considered
 
@@ -181,4 +183,5 @@ The supervisor's three manuscripts ([S], in `sources/`):
   validation rather than at the break point.
 - Whether a K-free, information/variance-based structural reward (Information Dropout bridge) matches K(D) on the
   parameter axis, or only on robustness axes.
-- Theory for why spread helps `joint_simple` (break 65% → 75% on berman) but not `joint_submodular`.
+- Whether spread helps at all: the first spread runs weighted the bias column of A incorrectly (fixed); the
+  observation "spread helps `joint_simple` (break 65% → 75%) but not `joint_submodular`" awaits the rerun.

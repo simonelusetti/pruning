@@ -4,13 +4,14 @@ Candidates are every deletable coefficient plus, for each hidden neuron, its fan
 folded downstream) and its fan-out cut. A candidate's reward is the parameters it newly covers, so the savings K are a
 coverage function, exact for neuron-level cleanup; its cost is the K-FAC damage. Each round greedily takes the lowest
 damage per newly covered parameter: neuron cuts one at a time with their exact rank-one compensation, weights in the
-order scored at the start of the round. A converged AXB solve per changed module then compensates the round exactly."""
+order scored at the start of the round. A converged AXB solve per changed module then compensates the round exactly.
+With target=labels every cost also carries g'delta for the deletion and its compensating response."""
 from __future__ import annotations
 
 import math
 import time
 import torch
-from pruning.methods.kfac import Coefficients, validate
+from pruning.methods.kfac import Coefficients, trusted, validate
 from pruning.nnprune.kronecker import KFAC, damage, masked_cg
 from pruning.nnprune.streaming import kth
 
@@ -48,6 +49,9 @@ class Module:
         self.fan = co.modules[name].in_features
         self.wa = self.value[:, :self.fan] @ self.a[:self.fan, :self.fan] if 0 in axes else None
         self.bw = self.b @ self.value if 1 in axes else None
+        self.g = co.linear.get(name)
+        self.pg = self.p @ self.g if self.g is not None and 0 in axes else None
+        self.gq = self.g @ self.q if self.g is not None and 1 in axes else None
 
     def update(self, x, y):
         self.value += torch.outer(x, y)
@@ -57,10 +61,16 @@ class Module:
             self.bw += torch.outer(self.b @ x, y)
 
     def drop_row(self, index):
+        if self.pg is not None and self.p[index, index] > 0:
+            self.pg -= torch.outer(self.p[:, index], self.pg[index]) / self.p[index, index]
+            self.pg[index] = 0
         downdate(self.p, index)
         self.free[index] = False
 
     def drop_col(self, index):
+        if self.gq is not None and self.q[index, index] > 0:
+            self.gq -= torch.outer(self.gq[:, index], self.q[index]) / self.q[index, index]
+            self.gq[:, index] = 0
         downdate(self.q, index)
         self.free[:, index] = False
 
@@ -97,8 +107,14 @@ class Module:
         self.col_open.index_add_(0, cols, -newly.long())
         return int(newly.sum())
 
-    def weight_scores(self, candidates):
-        cost = .5 * self.value.square() / (self.p.diag()[:, None] * self.q.diag()[None, :])
+    def weight_scores(self, candidates, compensate):
+        # Without compensation a deletion costs its OBD diagonal term, not its compensated OBS cost.
+        scale = (1 / (self.p.diag()[:, None] * self.q.diag()[None, :]) if compensate else
+                 self.b.diag()[:, None] * self.a.diag()[None, :])
+        cost = .5 * self.value.square() * scale
+        if self.g is not None:
+            p, q = self.p.diag(), self.q.diag()
+            cost = cost - self.value * (self.p @ self.g @ self.q / (p[:, None] * q[None, :]) if compensate else self.g)
         usable = candidates & self.free & self.open[:, :self.value.shape[1]] & self.value.ne(0)
         return cost.masked_fill(~usable | ~cost.isfinite(), torch.inf)
 
@@ -124,11 +140,20 @@ class JointSubmodular:
         costs, size = [], 0
         for name, axis, _ in options:
             module = modules[name]
+            compensate = self.branch.compensation == "full"
             if axis == 0:
-                cost = .5 * (module.value[:, :module.fan] * module.wa).sum(1) / module.p.diag()
+                cost = .5 * (module.value[:, :module.fan] * module.wa).sum(1) * (
+                    1 / module.p.diag() if compensate else module.b.diag())
+                if module.g is not None:
+                    cost = cost - (module.value[:, :module.fan] * (
+                        module.pg[:, :module.fan] / module.p.diag()[:, None] if compensate else module.g[:, :module.fan])).sum(1)
                 size = size + module.row_open
             else:
-                cost = .5 * (module.value[:, :hidden] * module.bw[:, :hidden]).sum(0) / module.q.diag()[:hidden]
+                cost = .5 * (module.value[:, :hidden] * module.bw[:, :hidden]).sum(0) * (
+                    1 / module.q.diag()[:hidden] if compensate else module.a.diag()[:hidden])
+                if module.g is not None:
+                    cost = cost - (module.value[:, :hidden] * (
+                        module.gq[:, :hidden] / module.q.diag()[:hidden] if compensate else module.g[:, :hidden])).sum(0)
                 size = size + module.col_open[:hidden]
             costs.append(torch.nan_to_num(cost, nan=math.inf))
         cost, choice = torch.stack(costs).min(0)
@@ -171,7 +196,8 @@ class JointSubmodular:
         best = {index: self.neuron_scores(group, modules) for index, group in enumerate(groups)}
         pool = torch.empty(0)
         if self.branch.unit != "neuron":
-            scores = {name: modules[name].weight_scores(self.co.candidates(name)) for name in names}
+            scores = {name: modules[name].weight_scores(self.co.candidates(name), self.branch.compensation == "full")
+                      for name in names}
             finite = sum(int(score.isfinite().sum()) for score in scores.values())
             threshold = kth(lambda: ((score, None) for score in scores.values()), min(quota, finite)) if finite and quota else -math.inf
             entries = [(index, score.le(threshold).nonzero()) for index, score in enumerate(scores.values())]
@@ -210,6 +236,7 @@ class JointSubmodular:
                 best[index] = self.neuron_scores(groups[index], modules)
         return covered, cuts
 
+    @trusted
     @torch.no_grad()
     def propose(self, problem, target, index, progress):
         co, started, history = self.co, time.perf_counter(), []

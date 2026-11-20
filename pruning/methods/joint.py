@@ -198,6 +198,8 @@ class Joint:
 
     def __init__(self, problem, branch):
         validate(branch, curvatures=("fisher", "kfac"), scopes=("global",))
+        if branch.objective != "kl" or branch.factor_backend != "memory" or branch.replay:
+            raise ValueError("joint builds its own curvature: objective=kl, factor_backend=memory, replay=false")
         options = self.options = branch.options
         self.branch, self.estimation = branch, branch.estimation
         if (min(options.lambda_u, options.lambda_d, options.mu) < 0 or min(options.window, options.max_group) < 1 or

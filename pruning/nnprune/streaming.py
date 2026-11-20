@@ -29,8 +29,8 @@ def kth(chunks, rank, *, device="cpu", chunk_size=8_000_000):
     """Smallest threshold whose weighted count of finite values reaches `rank`.
 
     `chunks()` yields (values, weights or None) pairs and is called once per radix pass, so the scores can
-    live on disk. Nonnegative float64 bit patterns sort like their values."""
-    prefix = 0
+    live on disk. Float64 bits become order-preserving unsigned keys: positives flip the sign bit, negatives flip all."""
+    prefix, sign = 0, -(1 << 63)
     for shift in range(56, -1, -8):
         histogram = torch.zeros(256, dtype=torch.float64, device=device)
         for values, weights in chunks():
@@ -38,10 +38,11 @@ def kth(chunks, rank, *, device="cpu", chunk_size=8_000_000):
             weights = torch.ones_like(values, dtype=torch.float64) if weights is None else weights.flatten()
             for value, weight in zip(values.split(chunk_size), weights.split(chunk_size)):
                 bits = value.to(device=device, dtype=torch.float64).view(torch.int64)
+                keys = bits ^ ((bits >> 63) | sign)
                 eligible = value.to(device).isfinite()
                 if shift < 56:
-                    eligible &= (bits >> (shift + 8)) == (prefix >> (shift + 8))
-                histogram += torch.bincount((bits[eligible] >> shift) & 255,
+                    eligible &= ((keys >> (shift + 8)) & ((1 << (56 - shift)) - 1)) == (prefix >> (shift + 8))
+                histogram += torch.bincount((keys[eligible] >> shift) & 255,
                                             weights=weight.to(device=device, dtype=torch.float64)[eligible], minlength=256)
         cumulative = histogram.cumsum(0)
         if rank > float(cumulative[-1]):
@@ -49,4 +50,5 @@ def kth(chunks, rank, *, device="cpu", chunk_size=8_000_000):
         bucket = int(torch.searchsorted(cumulative, cumulative.new_tensor(rank)))
         rank -= float(cumulative[bucket - 1]) if bucket else 0.
         prefix |= bucket << shift
-    return float(torch.tensor(prefix, dtype=torch.int64).view(torch.float64))
+    key = prefix - (1 << 64) if prefix >= 1 << 63 else prefix
+    return float(torch.tensor(key ^ sign if key < 0 else ~key, dtype=torch.int64).view(torch.float64))

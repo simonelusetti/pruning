@@ -55,6 +55,9 @@ Our curvature methods are one branch each; their variants are shared settings ([
 | `unit` | `both`, `weight`, `neuron` | Deletion candidates: single coefficients, whole hidden units, or either with neuron savings credited. |
 | `affine` | `true`, `false` | Biases are deletion candidates and compensation variables, or frozen. |
 | `curvature` | `kfac`, `fisher` | Block-diagonal K-FAC (no cross-module terms) or the exact model Fisher (cross-module terms; small models only). |
+| `objective` | `kl`, `spread` | With K-FAC on supervised benchmarks, `spread` reweights the Fisher sample toward examples the pruned model already distorts most (mean + β·std of the per-example KL). |
+| `compensation` | `full`, `none` | Surviving coefficients are re-solved after each deletion, or left as they are (`singular`, `joint_submodular`). |
+| `target` | `model`, `labels` | `labels` adds `gᵀδ` to deletion costs (`singular`, `joint_submodular`, supervised benchmarks): `g` is the true-label loss gradient on the held-out selection split, `δ` the deletion plus, under compensation, its quadratic response. Compensation never follows `g`. Each step is tried with the A/B damping scaled by every value in `trust` and keeps the lowest selection-split loss. |
 | `factor_backend` | `memory`, `streaming` | Streaming estimates K-FAC factors one decoder block at a time on the unchanged model and keeps factors and scores in `runtime.scratch`. |
 | `estimation.*` | | Fisher sample (`n`, `seed`, `batch`), likelihood, variance and A/B damping, shared by every method. |
 

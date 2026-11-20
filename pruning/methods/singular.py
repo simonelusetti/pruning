@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 import torch
-from pruning.methods.kfac import Coefficients, full, validate
+from pruning.methods.kfac import Coefficients, trusted, full, validate
 from pruning.nnprune.kronecker import damage, masked_cg
 from pruning.nnprune.streaming import Store, kth
 
@@ -20,10 +20,17 @@ class Singular:
         """Singleton costs per removed coefficient: weights (size 1) and whole neurons (cheapest cut over its size)."""
         names, pair = unit
         co, chunks = self.co, []
+        # Without compensation a deletion costs its OBD diagonal term, not its compensated OBS cost; with target=labels
+        # it also costs g'delta, delta being the deletion plus, under compensation, its quadratic response.
+        compensate = self.branch.compensation == "full"
         if self.branch.unit != "neuron":
             for name in names:
                 value = co.value(name)
-                cost = .5 * value.square() / metric.inverse_diagonal(name)
+                cost = .5 * value.square() * (1 / metric.inverse_diagonal(name) if compensate else metric.diagonal(name))
+                if name in co.linear:
+                    inverse_a, inverse_b = metric.inverses[name]
+                    g = co.linear[name]
+                    cost = cost - value * (inverse_b @ g @ inverse_a / metric.inverse_diagonal(name) if compensate else g)
                 chunks.append({"options": ((name, None, None),), "ratio": cost.masked_fill(~(co.candidates(name) & value.ne(0)), torch.inf),
                                "size": None, "choice": None})
         if self.branch.unit != "weight":
@@ -32,14 +39,21 @@ class Singular:
                 hidden = self.co.modules[options[0][0]].out_features
                 for name, axis, fan_in in options:
                     value, (a, b), (inverse_a, inverse_b) = co.value(name), metric.factors[name], metric.inverses[name]
+                    g = co.linear.get(name, torch.zeros_like(value))
                     alive = (co.initial[name] & full(co.modules[name]).ne(0).to(co.device)).to(value.device)
                     if axis == 0:
                         rows = value[:, :fan_in]
-                        costs.append(.5 * (rows * (rows @ a[:fan_in, :fan_in])).sum(1) / inverse_b.diag())
+                        costs.append(.5 * (rows * (rows @ a[:fan_in, :fan_in])).sum(1) *
+                                     (1 / inverse_b.diag() if compensate else b.diag()) -
+                                     (rows * (inverse_b @ g[:, :fan_in] / inverse_b.diag()[:, None] if compensate else
+                                              g[:, :fan_in])).sum(1))
                         size = size + alive.sum(1)
                     else:
                         columns = value[:, :hidden]
-                        costs.append(.5 * (columns * (b @ columns)).sum(0) / inverse_a.diag()[:hidden])
+                        costs.append(.5 * (columns * (b @ columns)).sum(0) *
+                                     (1 / inverse_a.diag()[:hidden] if compensate else a.diag()[:hidden]) -
+                                     (columns * ((g @ inverse_a)[:, :hidden] / inverse_a.diag()[:hidden] if compensate else
+                                                 g[:, :hidden])).sum(0))
                         size = size + alive[:, :hidden].sum(0)
                 cost, choice = torch.stack(costs).min(0)
                 chunks.append({"options": options, "ratio": torch.where(size > 0, cost / size.clamp_min(1), torch.inf),
@@ -47,17 +61,26 @@ class Singular:
         return chunks
 
     def deletions(self, names, chunks, threshold):
+        """Deleted coordinates, and the frozen rest of every cut neuron (cleanup removes it, so it does not compensate)."""
         deleted = {name: torch.zeros_like(self.co.candidates(name)) for name in names}
+        frozen = {name: torch.zeros_like(mask) for name, mask in deleted.items()}
         for chunk in chunks:
             chosen = chunk["ratio"] <= threshold
             for index, (name, axis, fan_in) in enumerate(chunk["options"]):
                 if axis is None:
                     deleted[name] |= chosen
-                elif axis == 0:
-                    deleted[name][chosen & chunk["choice"].eq(index), :fan_in] = True
+                    continue
+                picked = chosen & chunk["choice"].eq(index)
+                if axis == 0:
+                    deleted[name][picked, :fan_in] = True
                 else:
-                    deleted[name][:, :len(chosen)][:, chosen & chunk["choice"].eq(index)] = True
-        return {name: mask & self.co.candidates(name) for name, mask in deleted.items()}
+                    deleted[name][:, :len(chosen)][:, picked] = True
+            for name, axis, _ in chunk["options"] if chunk["options"][0][1] is not None else ():
+                if axis == 0:
+                    frozen[name][chosen] = True
+                else:
+                    frozen[name][:, :len(chosen)][:, chosen] = True
+        return {name: (mask & self.co.candidates(name), frozen[name]) for name, mask in deleted.items()}
 
     def prune(self, unit, store, target, threshold, history):
         names, co = unit[0], self.co
@@ -67,7 +90,7 @@ class Singular:
             required = co.required(target, names)
             threshold = kth(lambda: ((chunk["ratio"], chunk["size"]) for chunk in chunks), required) if required else -torch.inf
         values = {}
-        for name, mask in self.deletions(names, chunks, threshold).items():
+        for name, (mask, frozen) in self.deletions(names, chunks, threshold).items():
             if not mask.any():
                 continue
             reference = {name: co.value(name)}
@@ -77,12 +100,13 @@ class Singular:
                                 "predicted_fisher_damage": damage(metric, reference, {name: values[name]})})
                 continue
             values.update(masked_cg(metric, reference, {name: reference[name].masked_fill(mask, 0.)},
-                                    {name: co.live(name) & ~mask}, rtol=self.options.cg_rtol,
+                                    {name: co.live(name) & ~mask & ~frozen}, rtol=self.options.cg_rtol,
                                     iterations=self.options.cg_max_iterations, strict=True)[0])
             history.append({"module": name, "deleted": int(mask.sum()),
                             "predicted_fisher_damage": damage(metric, reference, {name: values[name]})})
         co.install(values)
 
+    @trusted
     @torch.no_grad()
     def propose(self, problem, target, index, progress):
         co, branch, started, history = self.co, self.branch, time.perf_counter(), []

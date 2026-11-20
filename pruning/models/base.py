@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import statistics
 import time
 import torch
 import torch.nn as nn
@@ -15,13 +14,14 @@ def fisher_subset(data, count, seed, device):
 
 
 def profile(problem):
-    """Median time of the held-out evaluation, repeated until a second has elapsed so small models are not noise."""
+    """Fastest of at least three held-out evaluations (repeated until a second has elapsed): the minimum is the
+    timing least affected by other load on the machine."""
     times = []
-    while not times or (sum(times) < 1 and len(times) < 25):
+    while len(times) < 3 or (sum(times) < 1 and len(times) < 25):
         started = time.perf_counter()
         losses = problem.losses("reporting")
         times.append(time.perf_counter() - started)
-    return losses, {"seconds": statistics.median(times), "repeats": len(times),
+    return losses, {"seconds": min(times), "repeats": len(times),
                     "parameter_bytes": problem.parameter_bytes()}
 
 

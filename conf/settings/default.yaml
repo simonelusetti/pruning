@@ -7,6 +7,8 @@ curvature: kfac
 factor_backend: memory
 objective: kl
 compensation: full
+target: model
+trust: [1, 10, 100, 1000, 10000]
 estimation:
   n: ${oc.select:benchmark.fisher_n,null}
   seed: ${oc.select:benchmark.fisher_seed,42}

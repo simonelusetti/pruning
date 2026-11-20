@@ -5,6 +5,9 @@ Shared settings (conf/settings/default.yaml) mean the same thing in every method
   replay  local only: units are pruned block by block, each measured on the already pruned model.
   unit    weight: single coefficients; neuron: whole hidden units; both: either, with neuron savings credited.
   affine  biases are deletion candidates and compensation variables, or frozen.
+  target  model: costs are the quadratic KL to the dense model; labels: deletion costs also carry g'delta, g the
+          true-label loss gradient on the held-out selection split, with delta the deletion and, under compensation,
+          its quadratic response. Compensation never follows g, so nothing moves unless something is deleted.
 A solve unit is one affine module, or a whole canonical group (MLP chain, gated MLP) when neurons are candidates."""
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import tempfile
 from pathlib import Path
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from pruning.nnprune.kronecker import KFAC, RowsFisher, example_kl, kronecker_factors
 from pruning.nnprune.fisher_metric import Fisher
@@ -36,6 +40,31 @@ def validate(branch, *, curvatures, scopes=("local", "global"), units=("weight",
         raise ValueError("objective is kl, or spread with K-FAC curvature")
     if branch.factor_backend not in {"memory", "streaming"} or (branch.factor_backend == "streaming" and branch.curvature != "kfac"):
         raise ValueError("factor_backend is memory, or streaming with K-FAC curvature")
+    if branch.target not in {"model", "labels"} or (branch.target == "labels" and branch.name not in {"singular", "joint_submodular"}):
+        raise ValueError("target is model, or labels with singular or joint_submodular")
+
+
+def trusted(propose):
+    """With target=labels a step is tried with the factor damping scaled by each of `branch.trust`, keeping the
+    lowest selection-split loss: a grid Levenberg-Marquardt trust region on how far the linear term is believed."""
+    def search(self, problem, target, index, progress):
+        if self.branch.target != "labels":
+            return propose(self, problem, target, index, progress)
+        estimation = self.branch.estimation
+        base, start, best = (estimation.a_damping, estimation.b_damping), problem.snapshot(), None
+        try:
+            for scale in self.branch.trust:
+                problem.restore(start)
+                estimation.a_damping, estimation.b_damping = base[0] * scale, base[1] * scale
+                result = propose(self, problem, target, index, progress)
+                loss = float(problem.losses("selection").mean())
+                if best is None or loss < best[0]:
+                    best = loss, scale, problem.snapshot(), result
+        finally:
+            estimation.a_damping, estimation.b_damping = base
+        problem.restore(best[2])
+        return best[3] | {"trust_scale": best[1], "trust_selection_loss": best[0]}
+    return search
 
 
 def full(module):
@@ -69,8 +98,9 @@ class Coefficients:
         self.gated = [group for group in groups if set(group.names) <= self.modules.keys()]
         # Downstream biases absorb folded constants, so they are never deletion candidates.
         self.protected = {name for names, _ in self.chains for name in names[1:] if self.modules[name].bias is not None}
-        if branch.objective == "spread" and hasattr(problem, "b_sequences"):
-            raise ValueError("objective=spread currently needs a supervised benchmark")
+        if (branch.objective == "spread" or branch.target == "labels") and hasattr(problem, "b_sequences"):
+            raise ValueError("objective=spread and target=labels currently need a supervised benchmark")
+        self.linear = {}
         self.dense = copy.deepcopy(model).eval() if branch.objective == "spread" else None
         self.account()
 
@@ -185,7 +215,8 @@ class Coefficients:
     def factors(self, names, estimation):
         """Damped K-FAC factors. With objective=spread, each example is weighted by how much more than average the
         current model already distorts its prediction (exact KL from the dense model, standardized), which is the
-        reweighted-Fisher step for the bound mean_i KL_i + beta * std_i KL_i, beta = sqrt(2 log(1/eta) / n)."""
+        reweighted-Fisher step for the bound mean_i KL_i + beta * std_i KL_i, beta = sqrt(2 log(1/eta) / n).
+        With target=labels the same call refreshes `linear`, the held-out gradient at the current weights."""
         problem, sampling = self.problem, self.problem.cfg.sampling
         language = hasattr(problem, "b_sequences")
         x, _ = problem.fisher_data(estimation.n, estimation.seed)
@@ -196,6 +227,8 @@ class Coefficients:
             max_b_tokens=(sampling.b_tokens or None) if language else None,
             a_batch_size=sampling.activation_batch_size if language else None,
             b_batch_size=sampling.b_batch_size if language else None, weights=weights)
+        if self.branch.target == "labels":
+            self.linear.update(self.label_gradient(names, estimation))
         return {name: (a[:self.width(name), :self.width(name)], b) for name, (a, b) in factors.items()}
 
     @torch.no_grad()
@@ -208,6 +241,37 @@ class Coefficients:
         z = (kl - kl.mean()) / spread if spread > 0 else torch.zeros_like(kl)
         beta = math.sqrt(2 * math.log(1 / estimation.confidence) / len(kl))
         return (1 + beta * z).clamp_min(0)
+
+    def label_gradient(self, names, estimation):
+        """Mean gradient of the true-label loss on the selection split, zero on coordinates no longer live."""
+        data = self.problem.splits["selection"]
+        batches = data if isinstance(data, DataLoader) else DataLoader(TensorDataset(*data), batch_size=estimation.batch)
+        parameters = [parameter for name in names for parameter in (self.modules[name].weight, self.modules[name].bias)
+                      if parameter is not None]
+        required = [parameter.requires_grad for parameter in parameters]
+        totals, count = [torch.zeros_like(parameter, dtype=torch.float64) for parameter in parameters], 0
+        try:
+            for parameter in parameters:
+                parameter.requires_grad_(True)
+            with torch.enable_grad():
+                for x, y in batches:
+                    output = self.problem.model(x.to(self.problem.device))
+                    output, y = output.logits if hasattr(output, "logits") else output, y.to(self.problem.device)
+                    loss = (F.cross_entropy(output, y, reduction="sum") if output.shape[-1] > 1 else
+                            F.binary_cross_entropy_with_logits(output.flatten(), y.to(output).flatten(), reduction="sum"))
+                    for total, gradient in zip(totals, torch.autograd.grad(loss, parameters)):
+                        total += gradient.double()
+                    count += len(y)
+        finally:
+            for parameter, flag in zip(parameters, required):
+                parameter.requires_grad_(flag)
+        totals, result = iter(totals), {}
+        for name in names:
+            gradient = next(totals) / count
+            if self.modules[name].bias is not None:
+                gradient = torch.cat((gradient, next(totals)[:, None] / count), 1)
+            result[name] = gradient[:, :self.width(name)].masked_fill(~self.live(name), 0.)
+        return result
 
     def fisher(self, names, estimation, dtype):
         network = Network(self.problem, canonicalization=False)
