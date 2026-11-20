@@ -37,7 +37,8 @@ class Module:
         self.reference = co.value(name)
         self.value = self.reference.clone()
         self.a, self.b = factors
-        self.free = co.live(name)
+        self.fixed = ~co.live(name)
+        self.free = ~self.fixed
         self.p = restricted_inverse(self.b, self.free.any(1))
         self.q = restricted_inverse(self.a, self.free.any(0))
         live = co.problem.extra["live"][name].to(self.value.device)
@@ -90,6 +91,8 @@ class Module:
 
     def zero(self, rows, cols, chunk=50_000):
         """Delete single weights (no compensation until the round's solve); returns how many were newly covered."""
+        eligible = self.free[rows, cols] & self.open[rows, cols]
+        rows, cols = rows[eligible], cols[eligible]
         values = self.value[rows, cols].clone()
         self.value[rows, cols] = 0
         self.deleted[rows, cols] = True
@@ -264,7 +267,9 @@ class JointSubmodular:
             for name, module in modules.items():
                 if not module.deleted.any():
                     continue
-                reference, start = {name: module.reference}, {name: module.value.masked_fill(module.deleted, 0.)}
+                # Rank-one trials can revive old scattered zeros; restore every deletion before the refit.
+                reference = {name: module.reference}
+                start = {name: module.value.masked_fill(module.deleted | module.fixed, 0.)}
                 values.update(start if self.branch.compensation == "none" else
                               masked_cg(metric, reference, start, {name: module.free}, rtol=self.options.cg_rtol,
                                         iterations=self.options.cg_max_iterations, strict=True)[0])
